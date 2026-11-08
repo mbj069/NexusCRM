@@ -11,10 +11,10 @@ router.use(requireAuth, requirePermission('crm'));
 
 // GET /api/ledgers/:contactId
 router.get('/:contactId', ah(async (req, res) => {
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.params.contactId);
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.params.contactId);
   if (!contact) throw httpError(404, 'Contact not found.');
 
-  const plans = db.prepare(`SELECT pp.*, d.deal_value, d.stage AS deal_stage, pr.code AS property_code,
+  const plans = await db.prepare(`SELECT pp.*, d.deal_value, d.stage AS deal_stage, pr.code AS property_code,
       pr.title AS property_title FROM payment_plans pp
     LEFT JOIN deals d ON d.id = pp.deal_id
     LEFT JOIN properties pr ON pr.id = d.property_id
@@ -24,15 +24,17 @@ router.get('/:contactId', ah(async (req, res) => {
   const outPlans = [];
   for (const plan of plans) {
     const p = camel(plan);
-    p.schedule = db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq')
-      .all(plan.id).map((s) => {
-        const row = camel(s);
-        row.payments = db.prepare('SELECT * FROM payments WHERE schedule_id = ? ORDER BY created_at')
-          .all(s.id).map(camel);
-        row.paidAmount = row.payments.reduce((sum, x) => sum + x.amount, 0);
-        row.isOverdue = row.status === 'pending' && row.due_date < todayStr();
-        return row;
-      });
+    const schedRows = await db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq')
+      .all(plan.id);
+    p.schedule = [];
+    for (const s of schedRows) {
+      const row = camel(s);
+      row.payments = (await db.prepare('SELECT * FROM payments WHERE schedule_id = ? ORDER BY created_at')
+        .all(s.id)).map(camel);
+      row.paidAmount = row.payments.reduce((sum, x) => sum + x.amount, 0);
+      row.isOverdue = row.status === 'pending' && row.due_date < todayStr();
+      p.schedule.push(row);
+    }
     p.totalPaid = p.schedule.reduce((s, r) => s + r.paidAmount, 0);
     p.overdueAmount = p.schedule.filter((r) => r.isOverdue).reduce((s, r) => s + (r.amount - r.paidAmount), 0);
     p.balance = plan.total_amount - p.totalPaid;

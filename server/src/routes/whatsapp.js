@@ -8,8 +8,8 @@ import { requirePermission } from '../middleware/rbac.js';
 import { audit, auditReq } from '../audit.js';
 import { ah, httpError, uid } from '../util.js';
 
-function getWAConfig() {
-  const row = db.prepare('SELECT * FROM whatsapp_config WHERE id = 1').get();
+async function getWAConfig() {
+  const row = await db.prepare('SELECT * FROM whatsapp_config WHERE id = 1').get();
   return {
     phoneNumberId: row?.phone_number_id || process.env.WHATSAPP_PHONE_NUMBER_ID || '',
     token: row?.token || process.env.WHATSAPP_TOKEN || '',
@@ -23,16 +23,16 @@ function getWAConfig() {
 export const webhookRouter = Router();
 
 // GET — Meta verification handshake
-webhookRouter.get('/', (req, res) => {
+webhookRouter.get('/', ah(async (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  const cfg = getWAConfig();
+  const cfg = await getWAConfig();
   if (mode === 'subscribe' && token && cfg.verifyToken && token === cfg.verifyToken) {
     return res.status(200).type('text/plain').send(challenge);
   }
   return res.status(403).json({ error: 'Verification failed.' });
-});
+}));
 
 // POST — inbound events
 webhookRouter.post('/', ah(async (req, res) => {
@@ -52,7 +52,8 @@ webhookRouter.post('/', ah(async (req, res) => {
         const sender = msg.from || '';
         const text = msg.text.body.trim().slice(0, 1000);
         const profileName = value.contacts?.find((c) => c.wa_id === sender)?.profile?.name || '';
-        handleInboundMessage(sender, text, profileName);
+        handleInboundMessage(sender, text, profileName).catch((e) =>
+          console.error('whatsapp inbound message handling failed:', e.message));
       }
     }
   } catch (e) {
@@ -62,25 +63,25 @@ webhookRouter.post('/', ah(async (req, res) => {
 }));
 
 /** Create or update a WhatsApp-sourced lead from an inbound text message. */
-function handleInboundMessage(sender, text, profileName) {
+async function handleInboundMessage(sender, text, profileName) {
   if (!sender) return;
-  let lead = db.prepare("SELECT * FROM leads WHERE (phone = ? OR whatsapp = ?) AND source = 'WhatsApp' ORDER BY updated_at DESC LIMIT 1")
+  let lead = await db.prepare("SELECT * FROM leads WHERE (phone = ? OR whatsapp = ?) AND source = 'WhatsApp' ORDER BY updated_at DESC LIMIT 1")
     .get(sender, sender);
   if (lead) {
-    db.prepare("UPDATE leads SET updated_at = datetime('now') WHERE id = ?").run(lead.id);
+    await db.prepare("UPDATE leads SET updated_at = datetime('now') WHERE id = ?").run(lead.id);
   } else {
     const id = uid();
-    db.prepare(`INSERT INTO leads (id, name, phone, whatsapp, source, interest, stage, notes)
+    await db.prepare(`INSERT INTO leads (id, name, phone, whatsapp, source, interest, stage, notes)
       VALUES (?, ?, ?, ?, 'WhatsApp', '', 'new', 'Created from inbound WhatsApp message.')`)
       .run(id, profileName || sender, sender, sender);
-    lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(id);
+    lead = await db.prepare('SELECT * FROM leads WHERE id = ?').get(id);
     audit({
       actorId: '', actorName: 'whatsapp-webhook', role: '',
       action: 'LEAD_CREATE', entityType: 'lead', entityId: id,
       details: `Lead created from inbound WhatsApp message (${sender}).`,
     });
   }
-  db.prepare(`INSERT INTO activities (id, entity_type, entity_id, actor_id, kind, text)
+  await db.prepare(`INSERT INTO activities (id, entity_type, entity_id, actor_id, kind, text)
     VALUES (?, 'lead', ?, NULL, 'message', ?)`)
     .run(uid(), lead.id, `WhatsApp from ${sender}: ${text}`);
   audit({
@@ -97,7 +98,7 @@ whatsappRouter.use(requireAuth);
 
 // GET /api/whatsapp/config — admin; token never returned
 whatsappRouter.get('/config', requirePermission('whatsapp_config'), ah(async (req, res) => {
-  const cfg = getWAConfig();
+  const cfg = await getWAConfig();
   res.json({
     phoneNumberId: cfg.phoneNumberId,
     hasToken: !!cfg.token,
@@ -109,7 +110,7 @@ whatsappRouter.get('/config', requirePermission('whatsapp_config'), ah(async (re
 // PUT /api/whatsapp/config { phoneNumberId, token, verifyToken, enabled } — admin
 whatsappRouter.put('/config', requirePermission('whatsapp_config'), ah(async (req, res) => {
   const { phoneNumberId, token, verifyToken, enabled } = req.body || {};
-  db.prepare(`UPDATE whatsapp_config SET
+  await db.prepare(`UPDATE whatsapp_config SET
       phone_number_id = COALESCE(?, phone_number_id),
       token = COALESCE(?, token),
       verify_token = COALESCE(?, verify_token),
@@ -122,7 +123,7 @@ whatsappRouter.put('/config', requirePermission('whatsapp_config'), ah(async (re
       enabled !== undefined ? (enabled ? 1 : 0) : null
     );
   auditReq(req, 'WHATSAPP_CONFIG_UPDATE', { details: 'WhatsApp Cloud API config updated.' });
-  const cfg = getWAConfig();
+  const cfg = await getWAConfig();
   res.json({ phoneNumberId: cfg.phoneNumberId, hasToken: !!cfg.token, hasVerifyToken: !!cfg.verifyToken, enabled: cfg.enabled });
 }));
 
@@ -131,7 +132,7 @@ whatsappRouter.put('/config', requirePermission('whatsapp_config'), ah(async (re
 whatsappRouter.post('/send-test', requirePermission('whatsapp_config'), ah(async (req, res) => {
   const { to, text } = req.body || {};
   if (!to?.trim() || !text?.trim()) throw httpError(400, 'to and text are required.');
-  const cfg = getWAConfig();
+  const cfg = await getWAConfig();
   if (!cfg.enabled || !cfg.phoneNumberId || !cfg.token) {
     return res.json({ dryRun: true, wouldSend: { to: to.trim(), text: text.trim() } });
   }

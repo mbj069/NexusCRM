@@ -32,7 +32,7 @@ router.get('/', ah(async (req, res) => {
     LEFT JOIN deals d ON d.id = c.deal_id
     LEFT JOIN properties pr ON pr.id = d.property_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.created_at DESC`;
-  const rows = db.prepare(sql).all(...params).map(camel);
+  const rows = (await db.prepare(sql).all(...params)).map(camel);
   const summary = {
     pending: rows.filter((r) => r.status === 'pending').reduce((s, r) => s + r.amount, 0),
     paid: rows.filter((r) => r.status === 'paid').reduce((s, r) => s + r.amount, 0),
@@ -45,15 +45,15 @@ router.post('/:id/pay', ah(async (req, res) => {
   if (!can(req.user.role, 'pay_commissions')) {
     throw httpError(403, 'Insufficient permissions.');
   }
-  const row = db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id);
+  const row = await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Commission not found.');
   if (row.status === 'paid') throw httpError(400, 'Commission is already paid.');
   const { paidAt } = req.body || {};
   if (paidAt !== undefined && !/^\d{4}-\d{2}-\d{2}/.test(paidAt)) throw httpError(400, 'paidAt must be a date.');
   const stamp = paidAt ? `${String(paidAt).slice(0, 10)}T00:00:00.000Z` : new Date().toISOString();
-  db.prepare(`UPDATE commissions SET status = 'paid', paid_at = ? WHERE id = ?`).run(stamp, req.params.id);
+  await db.prepare(`UPDATE commissions SET status = 'paid', paid_at = ? WHERE id = ?`).run(stamp, req.params.id);
   auditReq(req, 'COMMISSION_PAY', { entityType: 'commission', entityId: req.params.id, details: `Commission ${row.amount} paid to agent ${row.agent_id} (deal ${row.deal_id}).` });
-  res.json(camel(db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id)));
+  res.json(camel(await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id)));
 }));
 
 export default router;

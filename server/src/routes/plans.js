@@ -2,7 +2,7 @@
 // installments, possession). Plan total must match the deal value.
 
 import { Router } from 'express';
-import { db, camel } from '../db.js';
+import { db, camel, withTransaction } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/rbac.js';
 import { auditReq } from '../audit.js';
@@ -19,11 +19,11 @@ router.post('/', ah(async (req, res) => {
   if (!dealId) throw httpError(400, 'dealId is required.');
   if (!contactId) throw httpError(400, 'contactId is required.');
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) throw httpError(400, 'startDate must be YYYY-MM-DD.');
-  const deal = db.prepare('SELECT * FROM deals WHERE id = ?').get(dealId);
+  const deal = await db.prepare('SELECT * FROM deals WHERE id = ?').get(dealId);
   if (!deal) throw httpError(404, 'Deal not found.');
-  const contact = db.prepare('SELECT id, name FROM contacts WHERE id = ?').get(contactId);
+  const contact = await db.prepare('SELECT id, name FROM contacts WHERE id = ?').get(contactId);
   if (!contact) throw httpError(404, 'Contact not found.');
-  const existing = db.prepare('SELECT id FROM payment_plans WHERE deal_id = ?').get(dealId);
+  const existing = await db.prepare('SELECT id FROM payment_plans WHERE deal_id = ?').get(dealId);
   if (existing) throw httpError(409, 'This deal already has a payment plan.');
 
   const down = Number(downPayment) || 0;
@@ -38,9 +38,8 @@ router.post('/', ah(async (req, res) => {
   }
 
   const planId = uid();
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    db.prepare(`INSERT INTO payment_plans (id, deal_id, contact_id, total_amount, down_payment,
+  await withTransaction(async (tx) => {
+    await tx.prepare(`INSERT INTO payment_plans (id, deal_id, contact_id, total_amount, down_payment,
         possession_amount, num_installments, installment_amount, start_date)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(planId, dealId, contactId, total, down, poss, n, inst, startDate);
@@ -50,18 +49,14 @@ router.post('/', ah(async (req, res) => {
       rows.push({ seq: i, due: addMonths(startDate, i), amount: inst, kind: 'installment' });
     }
     rows.push({ seq: n + 1, due: addMonths(startDate, n + 1), amount: poss, kind: 'possession' });
-    const ins = db.prepare(`INSERT INTO payment_schedule (id, plan_id, seq, due_date, amount, kind, status)
+    const ins = tx.prepare(`INSERT INTO payment_schedule (id, plan_id, seq, due_date, amount, kind, status)
       VALUES (?, ?, ?, ?, ?, ?, 'pending')`);
-    for (const r of rows) ins.run(uid(), planId, r.seq, r.due, r.amount, r.kind);
-    auditReq(req, 'PLAN_CREATE', { entityType: 'plan', entityId: planId, details: `Payment plan for deal ${dealId}: total ${total}, ${n} installments.` });
-    db.exec('COMMIT');
-  } catch (e) {
-    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-    throw e;
-  }
+    for (const r of rows) await ins.run(uid(), planId, r.seq, r.due, r.amount, r.kind);
+    await auditReq(req, 'PLAN_CREATE', { entityType: 'plan', entityId: planId, details: `Payment plan for deal ${dealId}: total ${total}, ${n} installments.` }, tx);
+  });
 
-  const plan = camel(db.prepare('SELECT * FROM payment_plans WHERE id = ?').get(planId));
-  plan.schedule = db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq').all(planId).map(camel);
+  const plan = camel(await db.prepare('SELECT * FROM payment_plans WHERE id = ?').get(planId));
+  plan.schedule = (await db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq').all(planId)).map(camel);
   res.status(201).json(plan);
 }));
 
@@ -71,21 +66,21 @@ router.get('/', ah(async (req, res) => {
   const sql = dealId
     ? 'SELECT * FROM payment_plans WHERE deal_id = ? ORDER BY created_at'
     : 'SELECT * FROM payment_plans ORDER BY created_at DESC';
-  const rows = dealId ? db.prepare(sql).all(dealId) : db.prepare(sql).all();
+  const rows = dealId ? await db.prepare(sql).all(dealId) : await db.prepare(sql).all();
   res.json(rows.map(camel));
 }));
 
 // GET /api/plans/:id — with schedule + payments
 router.get('/:id', ah(async (req, res) => {
-  const plan = db.prepare('SELECT * FROM payment_plans WHERE id = ?').get(req.params.id);
+  const plan = await db.prepare('SELECT * FROM payment_plans WHERE id = ?').get(req.params.id);
   if (!plan) throw httpError(404, 'Payment plan not found.');
   const out = camel(plan);
-  out.contact = camel(db.prepare('SELECT * FROM contacts WHERE id = ?').get(plan.contact_id));
-  out.deal = camel(db.prepare('SELECT * FROM deals WHERE id = ?').get(plan.deal_id));
-  out.schedule = db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq')
-    .all(req.params.id).map(camel);
-  out.payments = db.prepare(`SELECT p.*, u.name AS received_by_name FROM payments p
-    LEFT JOIN users u ON u.id = p.received_by WHERE p.plan_id = ? ORDER BY p.created_at`).all(req.params.id).map(camel);
+  out.contact = camel(await db.prepare('SELECT * FROM contacts WHERE id = ?').get(plan.contact_id));
+  out.deal = camel(await db.prepare('SELECT * FROM deals WHERE id = ?').get(plan.deal_id));
+  out.schedule = (await db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq')
+    .all(req.params.id)).map(camel);
+  out.payments = (await db.prepare(`SELECT p.*, u.name AS received_by_name FROM payments p
+    LEFT JOIN users u ON u.id = p.received_by WHERE p.plan_id = ? ORDER BY p.created_at`).all(req.params.id)).map(camel);
   out.totalPaid = out.payments.reduce((s, p) => s + p.amount, 0);
   out.balance = plan.total_amount - out.totalPaid;
   res.json(out);

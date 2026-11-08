@@ -1,22 +1,147 @@
 // ------------------------------------------------------------------
-// SQLite database + schema using Node's built-in node:sqlite (no native
-// dependencies). Money is stored as REAL in PKR; ids are TEXT uuids.
+// Database layer: Turso (libSQL) with a local-file fallback.
+//
+// The rest of the server talks to `db` through the same call shape the
+// previous local-only layer had, but async:
+//
+//   db.prepare(sql) -> { run(...args), get(...args), all(...args) }
+//     run() -> Promise<{ changes, lastInsertRowid }>
+//     get() -> Promise<row | null>        (first row, or null)
+//     all() -> Promise<row[]>             (plain objects keyed by column)
+//   db.exec(sql)    -> Promise<void>      (multi-statement schema only)
+//   withTransaction(fn) -> runs fn(txDb) inside BEGIN IMMEDIATE;
+//     commits on success, rolls back and rethrows on error.
+//
+// Parameters: `?` positional args, or `@name` named params passed as a
+// single object ({ name: value } — the `@` is stripped). libsql accepts
+// bare keys for `@name` placeholders, so named args pass through as-is.
+//
+// Backend selection (decided once at import):
+//   TURSO_DATABASE_URL (+ TURSO_AUTH_TOKEN) set -> remote Turso database.
+//   Otherwise -> local libSQL file at DB_PATH (default ./data/nexuscrm.db),
+//   which keeps local development working exactly as before.
+// On Vercel the Turso vars are required: a local file would not persist
+// across serverless invocations, so a missing TURSO_DATABASE_URL there
+// fails loudly at import instead of silently losing data.
 // ------------------------------------------------------------------
 
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DB_PATH = process.env.DB_PATH || './data/nexuscrm.db';
+const TURSO_URL = process.env.TURSO_DATABASE_URL || '';
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || '';
+const isRemote = !!TURSO_URL;
 
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+if (process.env.VERCEL && !isRemote) {
+  throw new Error('TURSO_DATABASE_URL is required on Vercel (local SQLite files do not persist in serverless functions).');
+}
 
-export const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+let client;
+if (isRemote) {
+  client = createClient({ url: TURSO_URL, authToken: TURSO_TOKEN || undefined });
+} else {
+  const DB_PATH = process.env.DB_PATH || './data/nexuscrm.db';
+  const resolved = path.resolve(DB_PATH);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  client = createClient({ url: `file:${resolved}` });
+}
 
-export function initSchema() {
-  db.exec(`
+// --- Value normalization -----------------------------------------------------
+// libsql returns INTEGERs as numbers in the normal range, but lastInsertRowid
+// (and out-of-range integers) arrive as bigint, which JSON.stringify rejects
+// and which breaks arithmetic. Normalize bigints to numbers. BLOBs arrive as
+// ArrayBuffer and are passed through untouched.
+
+function plainValue(v) {
+  return typeof v === 'bigint' ? Number(v) : v;
+}
+
+function plainRow(row) {
+  if (!row) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(row)) out[k] = plainValue(v);
+  return out;
+}
+
+function normalizeArg(v) {
+  if (v === undefined) return null;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  return v;
+}
+
+// Accepts: no args, positional values, or a single object for @name params.
+function normalizeArgs(sql, args) {
+  if (args.length === 0) return { sql, args: [] };
+  if (args.length === 1 && args[0] !== null && typeof args[0] === 'object' && !ArrayBuffer.isView(args[0]) && !Buffer.isBuffer(args[0])) {
+    return { sql, args: args[0] };
+  }
+  return { sql, args: args.map(normalizeArg) };
+}
+
+// A statement bound to one executor (the shared client, or one transaction).
+// prepare() itself is synchronous (it only builds the statement object);
+// run/get/all are async and do the actual I/O.
+function makeStatement(executor, sql) {
+  return {
+    async run(...args) {
+      const { sql: s, args: a } = normalizeArgs(sql, args);
+      const r = await executor.execute({ sql: s, args: a });
+      return { changes: r.rowsAffected ?? 0, lastInsertRowid: plainValue(r.lastInsertRowid) };
+    },
+    async get(...args) {
+      const { sql: s, args: a } = normalizeArgs(sql, args);
+      const r = await executor.execute({ sql: s, args: a });
+      return r.rows.length ? plainRow(r.rows[0]) : null;
+    },
+    async all(...args) {
+      const { sql: s, args: a } = normalizeArgs(sql, args);
+      const r = await executor.execute({ sql: s, args: a });
+      return r.rows.map(plainRow);
+    },
+  };
+}
+
+function makeDb(executor) {
+  return {
+    prepare: (sql) => makeStatement(executor, sql),
+    // Multi-statement SQL only (schema). Never route BEGIN/COMMIT/ROLLBACK
+    // through exec — use withTransaction() for that.
+    exec: async (sql) => {
+      await executor.executeMultiple(sql);
+    },
+  };
+}
+
+export const db = makeDb(client);
+
+/** Run fn(txDb) inside a write transaction (BEGIN IMMEDIATE in libsql). */
+export async function withTransaction(fn) {
+  const tx = await client.transaction('write');
+  try {
+    const result = await fn(makeDb(tx));
+    await tx.commit();
+    return result;
+  } catch (e) {
+    try { await tx.rollback(); } catch { /* already rolled back */ }
+    throw e;
+  }
+}
+
+export async function initSchema() {
+  // WAL is a local-file optimisation and is rejected by remote databases.
+  if (!isRemote) {
+    await client.execute('PRAGMA journal_mode = WAL');
+  }
+  // Foreign-key enforcement. Attempted on remote too, but a remote that
+  // rejects the pragma must not break startup.
+  try {
+    await client.execute('PRAGMA foreign_keys = ON');
+  } catch (e) {
+    console.error('PRAGMA foreign_keys = ON was rejected (continuing):', e.message);
+  }
+
+  await client.executeMultiple(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
@@ -247,8 +372,21 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
   `);
-  db.prepare('INSERT OR IGNORE INTO ai_config (id) VALUES (1)').run();
-  db.prepare('INSERT OR IGNORE INTO whatsapp_config (id) VALUES (1)').run();
+
+  // Upload storage columns (added idempotently for databases created
+  // before this migration). `url` = Vercel Blob public URL when Blob is
+  // configured; `data` = raw file bytes when stored in the database.
+  const cols = await db.prepare('PRAGMA table_info(documents)').all();
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('data')) {
+    await db.exec('ALTER TABLE documents ADD COLUMN data BLOB');
+  }
+  if (!names.has('url')) {
+    await db.exec('ALTER TABLE documents ADD COLUMN url TEXT');
+  }
+
+  await db.prepare('INSERT OR IGNORE INTO ai_config (id) VALUES (1)').run();
+  await db.prepare('INSERT OR IGNORE INTO whatsapp_config (id) VALUES (1)').run();
 }
 
 // --- Row mappers (snake_case -> camelCase) ----------------------------------

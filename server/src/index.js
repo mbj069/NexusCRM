@@ -1,9 +1,16 @@
 // NexusCRM server entry point.
-
+//
+// The Express app is exported for the Vercel serverless entry
+// (api/index.js re-exports it). It only binds a port when running outside
+// Vercel — `app.listen` is guarded on process.env.VERCEL.
+//
+// The schema is created at import time (top-level await) so cold starts
+// always have the tables, including on first deploy against a fresh Turso
+// database.
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { db, initSchema } from './db.js';
+import { initSchema } from './db.js';
 import authRouter from './routes/auth.js';
 import usersRouter from './routes/users.js';
 import contactsRouter from './routes/contacts.js';
@@ -22,7 +29,7 @@ import dashboardRouter from './routes/dashboard.js';
 import notificationsRouter from './routes/notifications.js';
 import auditRouter from './routes/audit.js';
 
-initSchema();
+await initSchema();
 
 const app = express();
 app.use(cors());
@@ -71,8 +78,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`nexuscrm-server listening on port ${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`nexuscrm-server listening on port ${PORT}`);
+  });
+}
 
 export default app;

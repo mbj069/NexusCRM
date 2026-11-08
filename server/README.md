@@ -3,8 +3,11 @@
 Backend API for NexusCRM — a generic CRM with a property-dealer module
 (inventory, deals, payment plans, receipts, commissions, ledgers).
 
-Stack: Node ≥ 22.5, Express 4, `node:sqlite` (built-in, zero native
-dependencies), `bcryptjs`, `jsonwebtoken`, `cors`, `dotenv`, `multer`.
+Stack: Node ≥ 22.5, Express 4, Turso (libSQL) via `@libsql/client` —
+remote Turso when `TURSO_DATABASE_URL` is set, otherwise a local libSQL
+file (same behaviour as before, no separate setup) — `bcryptjs`,
+`jsonwebtoken`, `cors`, `dotenv`, `multer` (memory storage), `@vercel/blob`
+for uploads when configured.
 
 ## Setup
 
@@ -35,7 +38,10 @@ The admin account is flagged `mustChangePassword` — change it via
 | `PORT`                    | HTTP port (default `4000`)                                     |
 | `JWT_SECRET`              | Secret for signing auth tokens — set a long random value       |
 | `JWT_EXPIRES_IN`          | Token lifetime, e.g. `8h` (default `8h`)                       |
-| `DB_PATH`                 | SQLite file path (default `./data/nexuscrm.db`)                |
+| `DB_PATH`                 | Local libSQL file (default `./data/nexuscrm.db`) — used only when `TURSO_DATABASE_URL` is unset |
+| `TURSO_DATABASE_URL`      | Turso database URL (`libsql://…`), e.g. from `turso db create`. **Required on Vercel** — local files do not persist in serverless functions |
+| `TURSO_AUTH_TOKEN`        | Turso auth token (`turso db tokens create <db>`) |
+| `BLOB_READ_WRITE_TOKEN`   | Vercel Blob token (optional). When set, uploads go to Blob; otherwise file bytes are stored in the database (5 MB cap per file) |
 | `AI_PROVIDER_URL`         | OpenAI-compatible base URL (default `https://api.openai.com/v1`) |
 | `AI_API_KEY`              | Provider key; an admin-set DB key overrides it                 |
 | `AI_MODEL`                | Default model (default `gpt-4o-mini`)                          |
@@ -112,12 +118,22 @@ All routes are under `/api` and require a `Bearer` token except
 
 ### Notes
 
-- Deal creation runs in `BEGIN IMMEDIATE` … `COMMIT`: the property row is
+- Deal creation runs in a write transaction (`withTransaction`, i.e.
+  `BEGIN IMMEDIATE` … `COMMIT` in libSQL): the property row is
   re-checked inside the transaction, so two concurrent bookings of the same
   property cannot both succeed — the loser gets `409 { error: "Property is
   not available (current status: …)." }`.
 - The audit log is append-only; there is no update/delete path for it.
+  Audit writes inside a transaction use the transaction's connection, so
+  they commit or roll back with it; outside transactions they are
+  fire-and-forget and never fail a request.
 - AI endpoints return `503 { error: "No AI provider API key configured.",
   code: "NO_API_KEY" }` when no key is set — they never crash.
-- Uploaded files are stored under `server/uploads/` as
-  `<uuid>-<sanitized-original-name>`.
+- Uploaded files are stored in Vercel Blob when `BLOB_READ_WRITE_TOKEN`
+  is set (public URL saved on the document row), otherwise as bytes in
+  the database (`documents.data`, 5 MB cap — larger files get 413). If a
+  Blob upload fails, the file falls back to database storage and the row
+  records `storage: "db"`, so nothing pretends to be in Blob. Downloads
+  redirect to the Blob URL or serve the database bytes. Rows from before
+  this change (disk-era, no URL and no bytes) still resolve from the
+  legacy `server/uploads/` directory when the file is there.

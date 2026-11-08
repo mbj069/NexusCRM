@@ -2,7 +2,7 @@
 // double-booking attempt fails atomically with 409.
 
 import { Router } from 'express';
-import { db, camel } from '../db.js';
+import { db, camel, withTransaction } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/rbac.js';
 import { auditReq } from '../audit.js';
@@ -34,7 +34,7 @@ router.get('/', ah(async (req, res) => {
     LEFT JOIN properties p ON p.id = d.property_id
     LEFT JOIN users u ON u.id = d.agent_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY d.updated_at DESC`;
-  res.json(db.prepare(sql).all(...params).map(camel));
+  res.json((await db.prepare(sql).all(...params)).map(camel));
 }));
 
 // POST /api/deals — transactional: property must be Available; on success it
@@ -48,11 +48,11 @@ router.post('/', ah(async (req, res) => {
     throw httpError(400, `commissionType must be one of: ${VALID_COMMISSION_TYPES.join(', ')}.`);
   }
   if (leadId) {
-    const lead = db.prepare('SELECT id FROM leads WHERE id = ?').get(leadId);
+    const lead = await db.prepare('SELECT id FROM leads WHERE id = ?').get(leadId);
     if (!lead) throw httpError(400, 'Lead not found.');
   }
   const agent = agentId || req.user.sub;
-  const agentRow = db.prepare('SELECT id FROM users WHERE id = ?').get(agent);
+  const agentRow = await db.prepare('SELECT id FROM users WHERE id = ?').get(agent);
   if (!agentRow) throw httpError(400, 'Agent not found.');
 
   const dealId = uid();
@@ -60,63 +60,58 @@ router.post('/', ah(async (req, res) => {
   const commValue = Number(commissionValue) || 0;
   const commAmount = commissionAmount(value, commissionType, commValue);
 
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const prop = db.prepare('SELECT * FROM properties WHERE id = ?').get(propertyId);
+  await withTransaction(async (tx) => {
+    const prop = await tx.prepare('SELECT * FROM properties WHERE id = ?').get(propertyId);
     if (!prop) throw httpError(404, 'Property not found.');
     if (prop.status !== 'Available') {
       throw httpError(409, `Property is not available (current status: ${prop.status}).`);
     }
-    db.prepare(`INSERT INTO deals (id, lead_id, property_id, agent_id, stage, deal_value,
+    await tx.prepare(`INSERT INTO deals (id, lead_id, property_id, agent_id, stage, deal_value,
         bayana_amount, commission_type, commission_value, notes)
       VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)`)
       .run(dealId, leadId || null, propertyId, agent, value, Number(bayanaAmount) || 0,
         commissionType, commValue, String(notes));
-    db.prepare(`UPDATE properties SET status = 'Booked', updated_at = datetime('now') WHERE id = ?`)
+    await tx.prepare(`UPDATE properties SET status = 'Booked', updated_at = datetime('now') WHERE id = ?`)
       .run(propertyId);
     const commId = uid();
-    db.prepare('INSERT INTO commissions (id, deal_id, agent_id, amount, status) VALUES (?, ?, ?, ?, ?)')
+    await tx.prepare('INSERT INTO commissions (id, deal_id, agent_id, amount, status) VALUES (?, ?, ?, ?, ?)')
       .run(commId, dealId, agent, commAmount, 'pending');
-    auditReq(req, 'DEAL_CREATE', { entityType: 'deal', entityId: dealId, details: `Deal created: ${prop.code} @ ${value} (agent ${agent}).` });
-    auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: propertyId, details: `Property ${prop.code} booked by deal ${dealId}.` });
-    db.exec('COMMIT');
-  } catch (e) {
-    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-    throw e;
-  }
+    await auditReq(req, 'DEAL_CREATE', { entityType: 'deal', entityId: dealId, details: `Deal created: ${prop.code} @ ${value} (agent ${agent}).` }, tx);
+    await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: propertyId, details: `Property ${prop.code} booked by deal ${dealId}.` }, tx);
+  });
 
-  const deal = db.prepare('SELECT * FROM deals WHERE id = ?').get(dealId);
+  const deal = await db.prepare('SELECT * FROM deals WHERE id = ?').get(dealId);
   res.status(201).json(camel(deal));
 }));
 
 // GET /api/deals/:id — embeds lead, property, plan summary, payments
 router.get('/:id', ah(async (req, res) => {
-  const row = db.prepare(`SELECT d.*, l.name AS lead_name, u.name AS agent_name FROM deals d
+  const row = await db.prepare(`SELECT d.*, l.name AS lead_name, u.name AS agent_name FROM deals d
     LEFT JOIN leads l ON l.id = d.lead_id LEFT JOIN users u ON u.id = d.agent_id
     WHERE d.id = ?`).get(req.params.id);
   if (!row) throw httpError(404, 'Deal not found.');
   const deal = camel(row);
-  deal.lead = row.lead_id ? camel(db.prepare('SELECT * FROM leads WHERE id = ?').get(row.lead_id)) : null;
-  deal.property = row.property_id ? camel(db.prepare('SELECT * FROM properties WHERE id = ?').get(row.property_id)) : null;
-  deal.commissions = db.prepare(`SELECT c.*, u.name AS agent_name FROM commissions c
-    LEFT JOIN users u ON u.id = c.agent_id WHERE c.deal_id = ?`).all(req.params.id).map(camel);
-  const plans = db.prepare('SELECT * FROM payment_plans WHERE deal_id = ?').all(req.params.id).map(camel);
+  deal.lead = row.lead_id ? camel(await db.prepare('SELECT * FROM leads WHERE id = ?').get(row.lead_id)) : null;
+  deal.property = row.property_id ? camel(await db.prepare('SELECT * FROM properties WHERE id = ?').get(row.property_id)) : null;
+  deal.commissions = (await db.prepare(`SELECT c.*, u.name AS agent_name FROM commissions c
+    LEFT JOIN users u ON u.id = c.agent_id WHERE c.deal_id = ?`).all(req.params.id)).map(camel);
+  const plans = (await db.prepare('SELECT * FROM payment_plans WHERE deal_id = ?').all(req.params.id)).map(camel);
   for (const plan of plans) {
-    plan.schedule = db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq').all(plan.id).map(camel);
-    plan.payments = db.prepare('SELECT * FROM payments WHERE plan_id = ? ORDER BY created_at').all(plan.id).map(camel);
+    plan.schedule = (await db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq').all(plan.id)).map(camel);
+    plan.payments = (await db.prepare('SELECT * FROM payments WHERE plan_id = ? ORDER BY created_at').all(plan.id)).map(camel);
     plan.totalPaid = plan.payments.reduce((s, p) => s + p.amount, 0);
   }
   deal.plans = plans;
-  deal.activities = db.prepare(`SELECT a.*, u.name AS actor_name FROM activities a
+  deal.activities = (await db.prepare(`SELECT a.*, u.name AS actor_name FROM activities a
     LEFT JOIN users u ON u.id = a.actor_id
     WHERE a.entity_type = 'deal' AND a.entity_id = ? ORDER BY a.created_at DESC`)
-    .all(req.params.id).map(camel);
+    .all(req.params.id)).map(camel);
   res.json(deal);
 }));
 
 // PUT /api/deals/:id — update terms (not stage; use /stage)
 router.put('/:id', ah(async (req, res) => {
-  const row = db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
+  const row = await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Deal not found.');
   if (['closed_won', 'closed_lost', 'cancelled'].includes(row.stage)) {
     throw httpError(400, `Deal is ${row.stage} and can no longer be edited.`);
@@ -126,7 +121,7 @@ router.put('/:id', ah(async (req, res) => {
     throw httpError(400, `commissionType must be one of: ${VALID_COMMISSION_TYPES.join(', ')}.`);
   }
   if (dealValue !== undefined && !(Number(dealValue) > 0)) throw httpError(400, 'dealValue must be positive.');
-  db.prepare(`UPDATE deals SET lead_id = COALESCE(?, lead_id), deal_value = COALESCE(?, deal_value),
+  await db.prepare(`UPDATE deals SET lead_id = COALESCE(?, lead_id), deal_value = COALESCE(?, deal_value),
     bayana_amount = COALESCE(?, bayana_amount), commission_type = COALESCE(?, commission_type),
     commission_value = COALESCE(?, commission_value), notes = COALESCE(?, notes),
     agent_id = COALESCE(?, agent_id), updated_at = datetime('now') WHERE id = ?`)
@@ -135,47 +130,42 @@ router.put('/:id', ah(async (req, res) => {
       commissionType ?? null, commissionValue !== undefined ? Number(commissionValue) || 0 : null,
       notes !== undefined ? String(notes) : null, agentId ?? null, req.params.id);
   // Keep the pending commission in sync with edited terms.
-  const updated = db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
+  const updated = await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
   const newComm = commissionAmount(updated.deal_value, updated.commission_type, updated.commission_value);
-  db.prepare(`UPDATE commissions SET amount = ?, agent_id = ? WHERE deal_id = ? AND status = 'pending'`)
+  await db.prepare(`UPDATE commissions SET amount = ?, agent_id = ? WHERE deal_id = ? AND status = 'pending'`)
     .run(newComm, updated.agent_id, req.params.id);
   auditReq(req, 'DEAL_UPDATE', { entityType: 'deal', entityId: req.params.id, details: `Updated deal terms.` });
-  res.json(camel(db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id)));
+  res.json(camel(await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id)));
 }));
 
 // POST /api/deals/:id/stage { stage }
 // closed_won -> property Sold; closed_lost/cancelled -> property Available;
 // token_paid/in_progress keep Booked.
 router.post('/:id/stage', ah(async (req, res) => {
-  const row = db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
+  const row = await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Deal not found.');
   const { stage } = req.body || {};
   if (!VALID_STAGES.includes(stage)) throw httpError(400, `Stage must be one of: ${VALID_STAGES.join(', ')}.`);
   if (stage === row.stage) return res.json(camel(row));
 
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    db.prepare(`UPDATE deals SET stage = ?, updated_at = datetime('now') WHERE id = ?`).run(stage, req.params.id);
-    const prop = row.property_id ? db.prepare('SELECT * FROM properties WHERE id = ?').get(row.property_id) : null;
+  await withTransaction(async (tx) => {
+    await tx.prepare(`UPDATE deals SET stage = ?, updated_at = datetime('now') WHERE id = ?`).run(stage, req.params.id);
+    const prop = row.property_id ? await tx.prepare('SELECT * FROM properties WHERE id = ?').get(row.property_id) : null;
     if (prop) {
       if (stage === 'closed_won' && prop.status !== 'Sold') {
-        db.prepare(`UPDATE properties SET status = 'Sold', updated_at = datetime('now') WHERE id = ?`).run(prop.id);
-        auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: prop.id, details: `Property ${prop.code} sold via deal ${req.params.id}.` });
+        await tx.prepare(`UPDATE properties SET status = 'Sold', updated_at = datetime('now') WHERE id = ?`).run(prop.id);
+        await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: prop.id, details: `Property ${prop.code} sold via deal ${req.params.id}.` }, tx);
       } else if ((stage === 'closed_lost' || stage === 'cancelled') && prop.status === 'Booked') {
-        db.prepare(`UPDATE properties SET status = 'Available', updated_at = datetime('now') WHERE id = ?`).run(prop.id);
-        auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: prop.id, details: `Property ${prop.code} released (deal ${req.params.id} ${stage}).` });
+        await tx.prepare(`UPDATE properties SET status = 'Available', updated_at = datetime('now') WHERE id = ?`).run(prop.id);
+        await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: prop.id, details: `Property ${prop.code} released (deal ${req.params.id} ${stage}).` }, tx);
       }
     }
-    db.prepare(`INSERT INTO activities (id, entity_type, entity_id, actor_id, kind, text)
+    await tx.prepare(`INSERT INTO activities (id, entity_type, entity_id, actor_id, kind, text)
       VALUES (?, 'deal', ?, ?, 'stage_change', ?)`)
       .run(uid(), req.params.id, req.user.sub, `Stage changed: ${row.stage} → ${stage}`);
-    auditReq(req, 'DEAL_STAGE', { entityType: 'deal', entityId: req.params.id, details: `Deal ${req.params.id}: ${row.stage} → ${stage}.` });
-    db.exec('COMMIT');
-  } catch (e) {
-    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-    throw e;
-  }
-  res.json(camel(db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id)));
+    await auditReq(req, 'DEAL_STAGE', { entityType: 'deal', entityId: req.params.id, details: `Deal ${req.params.id}: ${row.stage} → ${stage}.` }, tx);
+  });
+  res.json(camel(await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id)));
 }));
 
 export default router;

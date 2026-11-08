@@ -16,8 +16,8 @@ router.use(requireAuth);
 
 // --- Provider config (DB row, env fallback) --------------------------------
 
-function getAIConfig() {
-  const row = db.prepare('SELECT * FROM ai_config WHERE id = 1').get();
+async function getAIConfig() {
+  const row = await db.prepare('SELECT * FROM ai_config WHERE id = 1').get();
   return {
     baseUrl: row?.base_url || process.env.AI_PROVIDER_URL || 'https://api.openai.com/v1',
     // Admin-set key wins; otherwise env var. Never sent to the client.
@@ -27,7 +27,7 @@ function getAIConfig() {
 }
 
 async function providerChat({ messages, temperature = 0.3 }) {
-  const { baseUrl, apiKey, model } = getAIConfig();
+  const { baseUrl, apiKey, model } = await getAIConfig();
   if (!apiKey) {
     const err = new Error('No AI provider API key configured.');
     err.code = 'NO_API_KEY';
@@ -71,11 +71,11 @@ const aiError = (res, e) => {
 
 // --- Lead context for prompts (facts only, nothing invented) ----------------
 
-function leadText(leadId) {
-  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(leadId);
+async function leadText(leadId) {
+  const lead = await db.prepare('SELECT * FROM leads WHERE id = ?').get(leadId);
   if (!lead) return null;
-  const contact = lead.contact_id ? db.prepare('SELECT * FROM contacts WHERE id = ?').get(lead.contact_id) : null;
-  const acts = db.prepare(`SELECT kind, text, created_at FROM activities
+  const contact = lead.contact_id ? await db.prepare('SELECT * FROM contacts WHERE id = ?').get(lead.contact_id) : null;
+  const acts = await db.prepare(`SELECT kind, text, created_at FROM activities
     WHERE entity_type = 'lead' AND entity_id = ? ORDER BY created_at DESC LIMIT 10`).all(leadId);
   const lines = [
     `Name: ${lead.name}`,
@@ -94,8 +94,8 @@ function leadText(leadId) {
   return { lead, text: lines.join('\n') };
 }
 
-function overdueText() {
-  const rows = db.prepare(`SELECT s.*, pp.total_amount, c.name AS contact_name, c.phone AS contact_phone,
+async function overdueText() {
+  const rows = await db.prepare(`SELECT s.*, pp.total_amount, c.name AS contact_name, c.phone AS contact_phone,
       d.id AS deal_id, pr.code AS property_code FROM payment_schedule s
     JOIN payment_plans pp ON pp.id = s.plan_id
     JOIN contacts c ON c.id = pp.contact_id
@@ -104,11 +104,12 @@ function overdueText() {
     WHERE s.status = 'pending' AND s.due_date < ?
     ORDER BY s.due_date`).all(todayStr());
   if (!rows.length) return 'No overdue installments right now.';
-  const lines = rows.map((r) => {
-    const paid = db.prepare('SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE schedule_id = ?').get(r.id).s;
+  const lines = [];
+  for (const r of rows) {
+    const paid = (await db.prepare('SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE schedule_id = ?').get(r.id)).s;
     const kind = { down_payment: 'down payment', installment: `installment #${r.seq}`, possession: 'possession' }[r.kind] || r.kind;
-    return `- ${r.contact_name} (${r.contact_phone}): ${kind} of ${Number(r.amount).toLocaleString()} PKR due ${r.due_date}, paid so far ${Number(paid).toLocaleString()} — property ${r.property_code || '—'}`;
-  });
+    lines.push(`- ${r.contact_name} (${r.contact_phone}): ${kind} of ${Number(r.amount).toLocaleString()} PKR due ${r.due_date}, paid so far ${Number(paid).toLocaleString()} — property ${r.property_code || '—'}`);
+  }
   return `Overdue installments (${rows.length}):\n` + lines.join('\n');
 }
 
@@ -119,7 +120,7 @@ router.post('/score-lead', async (req, res) => {
   try {
     const { leadId } = req.body || {};
     if (!leadId) throw httpError(400, 'leadId is required.');
-    const ctx = leadText(leadId);
+    const ctx = await leadText(leadId);
     if (!ctx) throw httpError(404, 'Lead not found.');
     const { message, usage } = await providerChat({
       messages: [
@@ -148,7 +149,7 @@ Rules:
     if (!Number.isFinite(aiScore) || !parsed.reason) {
       throw Object.assign(new Error('The AI provider returned an unreadable score.'), { code: 'PROVIDER_ERROR' });
     }
-    db.prepare('UPDATE leads SET ai_score = ?, ai_score_reason = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    await db.prepare('UPDATE leads SET ai_score = ?, ai_score_reason = ?, updated_at = datetime(\'now\') WHERE id = ?')
       .run(aiScore, String(parsed.reason).slice(0, 500), leadId);
     auditReq(req, 'AI_SCORE', {
       entityType: 'lead', entityId: leadId,
@@ -169,12 +170,12 @@ router.post('/summarize', async (req, res) => {
     let auditDetails;
     if (kind === 'lead') {
       if (!id) throw httpError(400, 'id (leadId) is required for kind "lead".');
-      const ctx = leadText(id);
+      const ctx = await leadText(id);
       if (!ctx) throw httpError(404, 'Lead not found.');
       prompt = `Summarize this sales lead for the agent in 4-6 short bullet points: who they are, what they want, where they stand in the pipeline, and the single best next action. Facts only — do not invent data.\n\n${ctx.text}`;
       auditDetails = `AI summary for lead ${ctx.lead.name}.`;
     } else if (kind === 'overdue') {
-      prompt = `You are a collections assistant for a property dealership. Given the overdue installment list below, write a short briefing: total overdue amount, the most urgent accounts (oldest dues first), and a suggested follow-up order. Facts only — do not invent data. If the list is empty, say there is nothing overdue.\n\n${overdueText()}`;
+      prompt = `You are a collections assistant for a property dealership. Given the overdue installment list below, write a short briefing: total overdue amount, the most urgent accounts (oldest dues first), and a suggested follow-up order. Facts only — do not invent data. If the list is empty, say there is nothing overdue.\n\n${await overdueText()}`;
       auditDetails = 'AI overdue-installments briefing.';
     } else {
       throw httpError(400, 'kind must be "lead" or "overdue".');
@@ -194,26 +195,26 @@ router.post('/summarize', async (req, res) => {
 });
 
 // GET /api/ai/config — admin; key presence only, never the key itself
-router.get('/config', requirePermission('ai_config'), (req, res) => {
-  const c = getAIConfig();
-  const dbRow = db.prepare('SELECT api_key FROM ai_config WHERE id = 1').get();
+router.get('/config', requirePermission('ai_config'), ah(async (req, res) => {
+  const c = await getAIConfig();
+  const dbRow = await db.prepare('SELECT api_key FROM ai_config WHERE id = 1').get();
   res.json({
     baseUrl: c.baseUrl,
     model: c.model,
     hasApiKey: !!c.apiKey,
     keySource: c.apiKey ? (dbRow?.api_key ? 'database' : 'environment') : 'none',
   });
-});
+}));
 
 // PUT /api/ai/config { baseUrl, apiKey, model } — admin
-router.put('/config', requirePermission('ai_config'), (req, res) => {
+router.put('/config', requirePermission('ai_config'), ah(async (req, res) => {
   const { baseUrl, apiKey, model } = req.body || {};
-  db.prepare(`UPDATE ai_config SET base_url = COALESCE(?, base_url), api_key = COALESCE(?, api_key),
+  await db.prepare(`UPDATE ai_config SET base_url = COALESCE(?, base_url), api_key = COALESCE(?, api_key),
     model = COALESCE(?, model), updated_at = datetime('now') WHERE id = 1`)
     .run(baseUrl || null, apiKey || null, model || null);
   auditReq(req, 'AI_CONFIG_UPDATE', { details: `AI provider config updated (model: ${model || '(unchanged)'}).` });
   res.json({ ok: true });
-});
+}));
 
 // POST /api/ai/test — admin connectivity check
 router.post('/test', requirePermission('ai_config'), async (req, res) => {

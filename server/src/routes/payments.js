@@ -3,7 +3,7 @@
 // paid once cumulative payments cover its amount.
 
 import { Router } from 'express';
-import { db, camel } from '../db.js';
+import { db, camel, withTransaction } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requirePermission } from '../middleware/rbac.js';
 import { auditReq } from '../audit.js';
@@ -15,13 +15,13 @@ router.use(requireAuth, requirePermission('crm'));
 const VALID_METHODS = ['cash', 'bank', 'transfer'];
 
 /** Next receipt number for the current year, inside an open transaction. */
-function nextReceiptNo() {
+async function nextReceiptNo(tx) {
   const year = new Date().getFullYear();
   const name = `receipt_${year}`;
-  const row = db.prepare('SELECT next FROM counters WHERE name = ?').get(name);
+  const row = await tx.prepare('SELECT next FROM counters WHERE name = ?').get(name);
   const n = row ? row.next : 1;
-  if (row) db.prepare('UPDATE counters SET next = next + 1 WHERE name = ?').run(name);
-  else db.prepare('INSERT INTO counters (name, next) VALUES (?, 2)').run(name);
+  if (row) await tx.prepare('UPDATE counters SET next = next + 1 WHERE name = ?').run(name);
+  else await tx.prepare('INSERT INTO counters (name, next) VALUES (?, 2)').run(name);
   return `RCP-${year}-${String(n).padStart(4, '0')}`;
 }
 
@@ -34,29 +34,24 @@ router.post('/', ah(async (req, res) => {
 
   const paymentId = uid();
   let receiptNo;
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const sched = db.prepare('SELECT * FROM payment_schedule WHERE id = ?').get(scheduleId);
+  await withTransaction(async (tx) => {
+    const sched = await tx.prepare('SELECT * FROM payment_schedule WHERE id = ?').get(scheduleId);
     if (!sched) throw httpError(404, 'Schedule row not found.');
-    receiptNo = nextReceiptNo();
-    db.prepare(`INSERT INTO payments (id, plan_id, schedule_id, amount, method, received_by, receipt_no, notes)
+    receiptNo = await nextReceiptNo(tx);
+    await tx.prepare(`INSERT INTO payments (id, plan_id, schedule_id, amount, method, received_by, receipt_no, notes)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(paymentId, sched.plan_id, scheduleId, Number(amount), method, req.user.sub, receiptNo, String(notes));
-    const paidSoFar = db.prepare('SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE schedule_id = ?')
-      .get(scheduleId).s;
+    const paidSoFar = (await tx.prepare('SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE schedule_id = ?')
+      .get(scheduleId)).s;
     if (paidSoFar >= sched.amount - 0.01) {
-      db.prepare(`UPDATE payment_schedule SET status = 'paid', paid_at = datetime('now') WHERE id = ?`).run(scheduleId);
+      await tx.prepare(`UPDATE payment_schedule SET status = 'paid', paid_at = datetime('now') WHERE id = ?`).run(scheduleId);
     }
-    auditReq(req, 'PAYMENT', {
+    await auditReq(req, 'PAYMENT', {
       entityType: 'payment', entityId: paymentId,
       details: `Payment ${pkr(amount)} (${method}) against schedule ${sched.seq} of plan ${sched.plan_id} — receipt ${receiptNo}.`,
-    });
-    db.exec('COMMIT');
-  } catch (e) {
-    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-    throw e;
-  }
-  const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
+    }, tx);
+  });
+  const payment = await db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
   res.status(201).json(camel(payment));
 }));
 
@@ -68,19 +63,19 @@ router.get('/', ah(async (req, res) => {
        WHERE p.plan_id = ? ORDER BY p.created_at DESC`
     : `SELECT p.*, u.name AS received_by_name FROM payments p LEFT JOIN users u ON u.id = p.received_by
        ORDER BY p.created_at DESC LIMIT 200`;
-  res.json((planId ? db.prepare(sql).all(planId) : db.prepare(sql).all()).map(camel));
+  res.json(((planId ? await db.prepare(sql).all(planId) : await db.prepare(sql).all())).map(camel));
 }));
 
 // Shared receipt payload
-function receiptData(paymentId) {
-  const p = db.prepare(`SELECT p.*, u.name AS received_by_name FROM payments p
+async function receiptData(paymentId) {
+  const p = await db.prepare(`SELECT p.*, u.name AS received_by_name FROM payments p
     LEFT JOIN users u ON u.id = p.received_by WHERE p.id = ?`).get(paymentId);
   if (!p) throw httpError(404, 'Payment not found.');
-  const plan = db.prepare('SELECT * FROM payment_plans WHERE id = ?').get(p.plan_id);
-  const sched = db.prepare('SELECT * FROM payment_schedule WHERE id = ?').get(p.schedule_id);
-  const contact = plan ? db.prepare('SELECT * FROM contacts WHERE id = ?').get(plan.contact_id) : null;
-  const deal = plan ? db.prepare('SELECT * FROM deals WHERE id = ?').get(plan.deal_id) : null;
-  const property = deal?.property_id ? db.prepare('SELECT * FROM properties WHERE id = ?').get(deal.property_id) : null;
+  const plan = await db.prepare('SELECT * FROM payment_plans WHERE id = ?').get(p.plan_id);
+  const sched = await db.prepare('SELECT * FROM payment_schedule WHERE id = ?').get(p.schedule_id);
+  const contact = plan ? await db.prepare('SELECT * FROM contacts WHERE id = ?').get(plan.contact_id) : null;
+  const deal = plan ? await db.prepare('SELECT * FROM deals WHERE id = ?').get(plan.deal_id) : null;
+  const property = deal?.property_id ? await db.prepare('SELECT * FROM properties WHERE id = ?').get(deal.property_id) : null;
   const kindLabel = { down_payment: 'Down payment', installment: `Installment #${sched?.seq ?? ''}`, possession: 'Possession amount' }[sched?.kind] || sched?.kind || '';
   return {
     receiptNo: p.receipt_no,
@@ -105,12 +100,12 @@ receiptsRouter.use(requireAuth, requirePermission('crm'));
 
 // GET /api/receipts/:paymentId — receipt JSON
 receiptsRouter.get('/:paymentId', ah(async (req, res) => {
-  res.json(receiptData(req.params.paymentId));
+  res.json(await receiptData(req.params.paymentId));
 }));
 
 // GET /api/receipts/:paymentId/html — printable HTML receipt, no external assets
 receiptsRouter.get('/:paymentId/html', ah(async (req, res) => {
-  const r = receiptData(req.params.paymentId);
+  const r = await receiptData(req.params.paymentId);
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const html = `<!DOCTYPE html>
 <html lang="en">

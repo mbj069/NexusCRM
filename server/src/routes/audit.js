@@ -20,7 +20,7 @@ router.get('/', ah(async (req, res) => {
   if (entityId) { where.push('entity_id = ?'); params.push(entityId); }
   if (action) { where.push('action = ?'); params.push(action); }
   const sql = `SELECT * FROM audit_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`;
-  res.json(db.prepare(sql).all(...params, limit).map(camel));
+  res.json((await db.prepare(sql).all(...params, limit)).map(camel));
 }));
 
 export default router;
