@@ -12,10 +12,10 @@ const LEAD_STAGES = ['new', 'contacted', 'viewing', 'negotiating', 'won', 'lost'
 const ACTIVITY_KINDS = ['note', 'call', 'viewing', 'message'];
 const KIND_ICONS = { note: '📝', call: '📞', viewing: '👁️', message: '💬', stage_change: '🔀' };
 
-function LeadForm({ initial, onSaved, onCancel }) {
+function LeadForm({ initial, agents = [], canAssign = false, onSaved, onCancel }) {
   const [f, setF] = useState({
-    name: '', phone: '', whatsapp: '', type: 'buyer', source: '',
-    email: '', notes: '', interest: '', budgetMin: '', budgetMax: '',
+    name: '', phone: '', whatsapp: '', intent: 'buy', society: '', source: '',
+    notes: '', interest: '', budgetMin: '', budgetMax: '', assignedTo: '',
     ...(initial || {}),
   });
   const [error, setError] = useState('');
@@ -30,6 +30,7 @@ function LeadForm({ initial, onSaved, onCancel }) {
     try {
       const payload = { ...f };
       ['budgetMin', 'budgetMax'].forEach((k) => { if (payload[k] === '') delete payload[k]; else payload[k] = Number(payload[k]); });
+      if (!canAssign) delete payload.assignedTo;
       Object.keys(payload).forEach((k) => { if (payload[k] === '') delete payload[k]; });
       if (initial?.id) await put(`/api/leads/${initial.id}`, payload);
       else await post('/api/leads', payload);
@@ -46,10 +47,10 @@ function LeadForm({ initial, onSaved, onCancel }) {
       {error && <Alert kind="error">{error}</Alert>}
       <div className="form-row">
         <Field label="Full name *"><input className="input" value={f.name} onChange={set('name')} required /></Field>
-        <Field label="Type">
-          <select className="select" value={f.type} onChange={set('type')}>
-            <option value="buyer">Buyer</option>
-            <option value="seller">Seller</option>
+        <Field label="Intent">
+          <select className="select" value={f.intent || 'buy'} onChange={set('intent')}>
+            <option value="buy">🛒 Buy</option>
+            <option value="sell">🏷️ Sell</option>
           </select>
         </Field>
       </div>
@@ -58,10 +59,18 @@ function LeadForm({ initial, onSaved, onCancel }) {
         <Field label="WhatsApp"><input className="input" value={f.whatsapp} onChange={set('whatsapp')} placeholder="Defaults to phone if empty" /></Field>
       </div>
       <div className="form-row">
-        <Field label="Email"><input className="input" type="email" value={f.email} onChange={set('email')} /></Field>
+        <Field label="Society"><input className="input" value={f.society || ''} onChange={set('society')} placeholder="e.g. Model City, Gulberg City" /></Field>
         <Field label="Source"><input className="input" value={f.source} onChange={set('source')} placeholder="e.g. Facebook, referral, walk-in" /></Field>
       </div>
-      <Field label="Interest"><input className="input" value={f.interest} onChange={set('interest')} placeholder="e.g. 5 marla plot in DHA Phase 9" /></Field>
+      <Field label="Interest"><input className="input" value={f.interest} onChange={set('interest')} placeholder="e.g. 5 marla plot in Model City" /></Field>
+      {canAssign && (
+        <Field label="Assign to agent">
+          <select className="select" value={f.assignedTo || ''} onChange={set('assignedTo')}>
+            <option value="">Unassigned</option>
+            {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </Field>
+      )}
       <div className="form-row">
         <Field label="Budget min (PKR)"><input className="input" type="number" min="0" value={f.budgetMin} onChange={set('budgetMin')} /></Field>
         <Field label="Budget max (PKR)"><input className="input" type="number" min="0" value={f.budgetMax} onChange={set('budgetMax')} /></Field>
@@ -76,18 +85,28 @@ function LeadForm({ initial, onSaved, onCancel }) {
 }
 
 export function Leads() {
+  const { canAssign } = useAuth();
   const [leads, setLeads] = useState([]);
   const [stage, setStage] = useState('');
+  const [intent, setIntent] = useState('');
+  const [society, setSociety] = useState('');
+  const [societies, setSocieties] = useState([]);
+  const [agents, setAgents] = useState([]);
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showNew, setShowNew] = useState(false);
 
-  const load = async (s = stage, query = q) => {
+  const load = async (s = stage, query = q, intentF = intent, societyF = society) => {
     setLoading(true);
     setError('');
     try {
-      setLeads(asArray(await get('/api/leads' + qs({ stage: s, q: query }))));
+      const rows = asArray(await get('/api/leads' + qs({ stage: s, q: query, intent: intentF, society: societyF })));
+      setLeads(rows);
+      // Society filter options come from the full (unfiltered) data.
+      if (!s && !query && !intentF && !societyF) {
+        setSocieties([...new Set(rows.map((l) => l.society).filter(Boolean))].sort());
+      }
     } catch (e) {
       setError(e.message);
     } finally {
@@ -95,7 +114,10 @@ export function Leads() {
     }
   };
 
-  useEffect(() => { load('', ''); }, []);
+  useEffect(() => {
+    load('', '', '', '');
+    if (canAssign) get('/api/users/agents').then((r) => setAgents(asArray(r))).catch(() => {});
+  }, []);
 
   const stageOptions = useMemo(() => {
     const seen = new Set(leads.map((l) => l.stage).filter(Boolean));
@@ -103,7 +125,7 @@ export function Leads() {
     return [...seen];
   }, [leads]);
 
-  const applyFilters = () => load(stage, q);
+  const applyFilters = () => load(stage, q, intent, society);
 
   return (
     <>
@@ -115,9 +137,22 @@ export function Leads() {
 
       <div className="filter-bar">
         <Field label="Stage">
-          <select className="select" value={stage} onChange={(e) => { setStage(e.target.value); load(e.target.value, q); }}>
+          <select className="select" value={stage} onChange={(e) => { setStage(e.target.value); load(e.target.value, q, intent, society); }}>
             <option value="">All stages</option>
             {stageOptions.map((s) => <option key={s} value={s}>{prettyLabel(s)}</option>)}
+          </select>
+        </Field>
+        <Field label="Buy / Sell">
+          <select className="select" value={intent} onChange={(e) => { setIntent(e.target.value); load(stage, q, e.target.value, society); }}>
+            <option value="">Buy &amp; Sell</option>
+            <option value="buy">🛒 Buy</option>
+            <option value="sell">🏷️ Sell</option>
+          </select>
+        </Field>
+        <Field label="Society">
+          <select className="select" value={society} onChange={(e) => { setSociety(e.target.value); load(stage, q, intent, e.target.value); }}>
+            <option value="">All societies</option>
+            {societies.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </Field>
         <Field label="Search" hint="">
@@ -136,7 +171,7 @@ export function Leads() {
         <div className="table-wrap">
           <table className="table">
             <thead>
-              <tr><th>Name</th><th>Phone</th><th>Type</th><th>Stage</th><th>Interest</th><th className="num">Budget</th><th></th></tr>
+              <tr><th>Name</th><th>Phone</th><th>Intent</th><th>Stage</th><th>Society</th><th>Assigned to</th><th>Interest</th><th className="num">Budget</th><th></th></tr>
             </thead>
             <tbody>
               {leads.map((l) => (
@@ -148,8 +183,10 @@ export function Leads() {
                       <WaButton phone={l.whatsapp || l.phone} name={l.name} />
                     </span>
                   </td>
-                  <td><Badge status={l.type} /></td>
+                  <td><Badge status={l.intent || 'buy'} /></td>
                   <td><Badge status={l.stage} /></td>
+                  <td className="muted">{l.society || '—'}</td>
+                  <td className="muted">{l.assignedName || 'Unassigned'}</td>
                   <td className="muted">{l.interest || '—'}</td>
                   <td className="num">{l.budgetMax ? pkr(l.budgetMax) : l.budgetMin ? pkr(l.budgetMin) + '+' : '—'}</td>
                   <td><Link to={`/leads/${l.id}`} className="btn btn-ghost btn-sm">Open →</Link></td>
@@ -162,7 +199,7 @@ export function Leads() {
 
       {showNew && (
         <Modal title="New lead" onClose={() => setShowNew(false)} wide>
-          <LeadForm onCancel={() => setShowNew(false)} onSaved={() => { setShowNew(false); load('', ''); }} />
+          <LeadForm agents={agents} canAssign={canAssign} onCancel={() => setShowNew(false)} onSaved={() => { setShowNew(false); load('', '', '', ''); }} />
         </Modal>
       )}
     </>
@@ -173,7 +210,7 @@ export function Leads() {
 
 export function LeadDetail() {
   const { id } = useParams();
-  const { user } = useAuth();
+  const { user, canAssign } = useAuth();
   const [lead, setLead] = useState(null);
   const [activities, setActivities] = useState([]);
   const [followups, setFollowups] = useState([]);
@@ -185,6 +222,9 @@ export function LeadDetail() {
   const [showDeal, setShowDeal] = useState(false);
   const [scoring, setScoring] = useState(false);
   const [aiScoring, setAiScoring] = useState(false);
+  const [agents, setAgents] = useState([]);
+  const [assignTo, setAssignTo] = useState('');
+  const [assignBusy, setAssignBusy] = useState(false);
 
   const [actKind, setActKind] = useState('note');
   const [actText, setActText] = useState('');
@@ -203,7 +243,9 @@ export function LeadDetail() {
         get(`/api/activities/lead/${id}`).catch(() => []),
         get('/api/followups').catch(() => []),
       ]);
-      setLead(l.lead || l);
+      const leadRow = l.lead || l;
+      setLead(leadRow);
+      setAssignTo(leadRow.assignedTo || '');
       setActivities(asArray(a));
       const mine = asArray(f).filter((x) => String(x.entityId) === String(id) && (x.entityType === 'lead'));
       setFollowups(mine);
@@ -214,7 +256,24 @@ export function LeadDetail() {
     }
   };
 
-  useEffect(() => { load(); }, [id]);
+  useEffect(() => {
+    load();
+    if (canAssign) get('/api/users/agents').then((r) => setAgents(asArray(r))).catch(() => {});
+  }, [id]);
+
+  const assignLead = async () => {
+    setAssignBusy(true);
+    setNotice('');
+    try {
+      await post(`/api/leads/${id}/assign`, { agentId: assignTo || null });
+      setNotice('');
+      load();
+    } catch (e) {
+      setNotice(e.message);
+    } finally {
+      setAssignBusy(false);
+    }
+  };
 
   const changeStage = async (stage) => {
     setNotice('');
@@ -312,7 +371,7 @@ export function LeadDetail() {
       <BackLink to="/leads" label="Leads" />
       <PageHeader
         title={lead.name}
-        sub={`${prettyLabel(lead.type || 'buyer')} · ${lead.phone || 'no phone'} · Source: ${lead.source || '—'}`}
+        sub={`${lead.intent === 'sell' ? '🏷️ Sell' : '🛒 Buy'}${lead.society ? ` · ${lead.society}` : ''} · ${lead.phone || 'no phone'} · Source: ${lead.source || '—'}`}
         actions={
           <>
             <WaButton phone={lead.whatsapp || lead.phone} name={lead.name} className="btn btn-secondary btn-sm" />
@@ -329,12 +388,30 @@ export function LeadDetail() {
           <dl className="kv">
             <dt>Phone</dt><dd>{lead.phone || '—'}</dd>
             <dt>WhatsApp</dt><dd>{lead.whatsapp || lead.phone || '—'}</dd>
-            <dt>Email</dt><dd>{lead.email || '—'}</dd>
+            <dt>Intent</dt><dd><Badge status={lead.intent || 'buy'} /></dd>
+            <dt>Society</dt><dd>{lead.society || '—'}</dd>
             <dt>Interest</dt><dd>{lead.interest || '—'}</dd>
             <dt>Budget</dt><dd>{lead.budgetMin || lead.budgetMax ? `${lead.budgetMin ? pkr(lead.budgetMin) : '—'} – ${lead.budgetMax ? pkr(lead.budgetMax) : '—'}` : '—'}</dd>
             <dt>Source</dt><dd>{lead.source || '—'}</dd>
+            <dt>Assigned to</dt><dd>{lead.assignedAgent?.name || 'Unassigned'}</dd>
             <dt>Notes</dt><dd>{lead.notes || '—'}</dd>
           </dl>
+          {canAssign && (
+            <>
+              <hr className="divider" />
+              <Field label="Assign to agent">
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <select className="select" value={assignTo} onChange={(e) => setAssignTo(e.target.value)} style={{ flex: 1 }}>
+                    <option value="">Unassigned</option>
+                    {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                  <button className="btn btn-primary btn-sm" onClick={assignLead} disabled={assignBusy}>
+                    {assignBusy ? 'Assigning…' : 'Assign'}
+                  </button>
+                </div>
+              </Field>
+            </>
+          )}
         </Card>
 
         <Card
@@ -461,7 +538,7 @@ export function LeadDetail() {
 
       {showEdit && (
         <Modal title="Edit lead" onClose={() => setShowEdit(false)} wide>
-          <LeadForm initial={lead} onCancel={() => setShowEdit(false)} onSaved={() => { setShowEdit(false); load(); }} />
+          <LeadForm initial={lead} agents={agents} canAssign={canAssign} onCancel={() => setShowEdit(false)} onSaved={() => { setShowEdit(false); load(); }} />
         </Modal>
       )}
       {showDeal && <DealModal lead={lead} onClose={() => setShowDeal(false)} />}

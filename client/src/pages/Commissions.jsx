@@ -1,19 +1,24 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { get, post, qs, asArray } from '../api';
+import { get, post, put, qs, asArray } from '../api';
 import { useAuth } from '../auth';
 import {
-  PageHeader, Card, Badge, EmptyState, Spinner, Alert, Field,
+  PageHeader, Card, Badge, EmptyState, Spinner, Alert, Field, Modal,
   pkr, fmtDate,
 } from '../components/ui';
 
 export default function Commissions() {
-  const { isManager } = useAuth();
+  const { isAdmin } = useAuth();
   const [rows, setRows] = useState([]);
   const [filters, setFilters] = useState({ agentId: '', status: '', from: '', to: '' });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [paying, setPaying] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [editAmount, setEditAmount] = useState('');
+  const [editStatus, setEditStatus] = useState('pending');
+  const [editBusy, setEditBusy] = useState(false);
+  const [editError, setEditError] = useState('');
 
   const load = async (f = filters) => {
     setLoading(true);
@@ -41,6 +46,31 @@ export default function Commissions() {
       setError(e.message);
     } finally {
       setPaying(null);
+    }
+  };
+
+  // Admin-only manual override: set the amount and/or status independent
+  // of the auto percent/fixed calculation. Audit-logged server-side.
+  const openEdit = (row) => {
+    setEditing(row);
+    setEditAmount(String(row.amount ?? ''));
+    setEditStatus(row.status || 'pending');
+    setEditError('');
+  };
+
+  const saveEdit = async (e) => {
+    e.preventDefault();
+    if (!editing) return;
+    setEditBusy(true);
+    setEditError('');
+    try {
+      await put(`/api/commissions/${editing.id}`, { amount: Number(editAmount), status: editStatus });
+      setEditing(null);
+      load();
+    } catch (err) {
+      setEditError(err.message);
+    } finally {
+      setEditBusy(false);
     }
   };
 
@@ -85,6 +115,30 @@ export default function Commissions() {
         <button className="btn btn-ghost" onClick={() => { const e = { agentId: '', status: '', from: '', to: '' }; setFilters(e); load(e); }}>Clear</button>
       </div>
 
+      {editing && (
+        <Modal title="Set commission manually" onClose={() => setEditing(null)}>
+          <form onSubmit={saveEdit}>
+            {editError && <Alert kind="error">{editError}</Alert>}
+            <p className="muted" style={{ marginTop: 0 }}>
+              Overrides the auto-calculated commission for this deal. The change is audit-logged.
+            </p>
+            <Field label="Amount (PKR) *">
+              <input className="input" type="number" min="0" value={editAmount} onChange={(e) => setEditAmount(e.target.value)} required />
+            </Field>
+            <Field label="Status">
+              <select className="select" value={editStatus} onChange={(e) => setEditStatus(e.target.value)}>
+                <option value="pending">Pending</option>
+                <option value="paid">Paid</option>
+              </select>
+            </Field>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setEditing(null)}>Cancel</button>
+              <button type="submit" className="btn btn-primary" disabled={editBusy}>{editBusy ? 'Saving…' : 'Save'}</button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
       {loading ? <Spinner /> : rows.length === 0 ? (
         <Card><EmptyState icon="💰" title="No commissions found" hint="Commissions appear once deals carry commission terms." /></Card>
       ) : (
@@ -102,14 +156,22 @@ export default function Commissions() {
                     <td>{r.dealId ? <Link to={`/deals/${r.dealId}`}>#{String(r.dealId).slice(0, 8)}</Link> : '—'}</td>
                     <td className="muted">{r.propertyCode || '—'}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{fmtDate(r.createdAt || r.created_at)}</td>
-                    <td className="num"><strong>{pkr(r.amount)}</strong></td>
+                    <td className="num">
+                      <strong>{pkr(r.amount)}</strong>
+                      {r.manual ? <div className="muted" style={{ fontSize: 12 }}>Manual</div> : null}
+                    </td>
                     <td><Badge status={st} /></td>
                     <td>
-                      {isManager && st !== 'paid' && (
-                        <button className="btn btn-primary btn-sm" disabled={paying === r.id} onClick={() => markPaid(r)}>
-                          {paying === r.id ? 'Marking…' : 'Mark paid'}
-                        </button>
-                      )}
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        {isAdmin && (
+                          <button className="btn btn-secondary btn-sm" onClick={() => openEdit(r)}>Set manually</button>
+                        )}
+                        {isAdmin && st !== 'paid' && (
+                          <button className="btn btn-primary btn-sm" disabled={paying === r.id} onClick={() => markPaid(r)}>
+                            {paying === r.id ? 'Marking…' : 'Mark paid'}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );

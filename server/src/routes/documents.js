@@ -39,6 +39,31 @@ const upload = multer({
 const router = Router();
 router.use(requireAuth, requirePermission('crm'));
 
+const isAgent = (req) => req.user.role === 'agent';
+
+// Agents may only touch documents on entities they can see: their assigned
+// leads, their own deals, contacts linked to their own leads/deals.
+// Properties are browseable by every role, so their documents are too.
+async function assertEntityVisible(req, entityType, entityId) {
+  if (!isAgent(req)) return;
+  const me = req.user.sub;
+  if (entityType === 'property') return;
+  if (entityType === 'lead') {
+    const row = await db.prepare('SELECT assigned_to FROM leads WHERE id = ?').get(entityId);
+    if (!row || row.assigned_to !== me) throw httpError(403, 'Lead not assigned to you.');
+  } else if (entityType === 'deal') {
+    const row = await db.prepare('SELECT agent_id FROM deals WHERE id = ?').get(entityId);
+    if (!row || row.agent_id !== me) throw httpError(403, 'Deal not assigned to you.');
+  } else if (entityType === 'contact') {
+    const row = await db.prepare(`SELECT id FROM contacts WHERE id = ? AND (
+        id IN (SELECT contact_id FROM leads WHERE assigned_to = ?)
+        OR id IN (SELECT l.contact_id FROM leads l JOIN deals d ON d.lead_id = l.id WHERE d.agent_id = ?)
+        OR id IN (SELECT pp.contact_id FROM payment_plans pp JOIN deals d ON d.id = pp.deal_id WHERE d.agent_id = ?))`)
+      .get(entityId, me, me, me);
+    if (!row) throw httpError(403, 'Contact not linked to your leads or deals.');
+  }
+}
+
 /** Public shape of a document row — never leaks the stored bytes. */
 function mapDocument(row) {
   if (!row) return null;
@@ -81,6 +106,19 @@ router.get('/', ah(async (req, res) => {
   const params = [];
   if (entityType) { where.push('d.entity_type = ?'); params.push(entityType); }
   if (entityId) { where.push('d.entity_id = ?'); params.push(entityId); }
+  if (isAgent(req)) {
+    if (entityType && entityId) {
+      await assertEntityVisible(req, entityType, entityId);
+    } else {
+      // No entity filter: restrict to the agent's own entities.
+      where.push(`(d.entity_type = 'property'
+        OR (d.entity_type = 'lead' AND d.entity_id IN (SELECT id FROM leads WHERE assigned_to = ?))
+        OR (d.entity_type = 'deal' AND d.entity_id IN (SELECT id FROM deals WHERE agent_id = ?))
+        OR (d.entity_type = 'contact' AND d.entity_id IN (SELECT contact_id FROM leads WHERE assigned_to = ?))
+        OR (d.entity_type = 'contact' AND d.entity_id IN (SELECT pp.contact_id FROM payment_plans pp JOIN deals d ON d.id = pp.deal_id WHERE d.agent_id = ?)))`);
+      params.push(req.user.sub, req.user.sub, req.user.sub, req.user.sub);
+    }
+  }
   const sql = `SELECT d.id, d.entity_type, d.entity_id, d.filename, d.original_name, d.mime,
       d.size, d.uploaded_by, d.created_at, d.url,
       CASE WHEN d.data IS NOT NULL THEN 1 ELSE 0 END AS has_data,
@@ -98,6 +136,7 @@ router.post('/', upload.single('file'), ah(async (req, res) => {
   if (!entityType || !entityId) {
     throw httpError(400, 'entityType and entityId are required.');
   }
+  await assertEntityVisible(req, entityType, entityId);
   const safe = path.basename(req.file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
   const filename = `${uid()}-${safe}`;
   const stored = await storeFile(filename, req.file.buffer, req.file.mimetype);
@@ -115,6 +154,7 @@ router.post('/', upload.single('file'), ah(async (req, res) => {
 router.get('/:id/download', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Document not found.');
+  await assertEntityVisible(req, row.entity_type, row.entity_id);
   if (row.url) return res.redirect(row.url);
   if (row.data) {
     const bytes = Buffer.from(row.data);
@@ -134,6 +174,7 @@ router.get('/:id/download', ah(async (req, res) => {
 router.delete('/:id', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Document not found.');
+  await assertEntityVisible(req, row.entity_type, row.entity_id);
   await db.prepare('DELETE FROM documents WHERE id = ?').run(req.params.id);
   if (row.url) {
     // Best-effort Blob cleanup; the row is already gone, so a Blob

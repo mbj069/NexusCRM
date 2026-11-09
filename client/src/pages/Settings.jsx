@@ -365,7 +365,7 @@ function UserModal({ initial, onClose, onSaved }) {
   );
 }
 
-/* ================= Audit log (admin/manager) ================= */
+/* ================= Audit log (admin only) ================= */
 
 function AuditTab() {
   const [rows, setRows] = useState([]);
@@ -425,14 +425,16 @@ function AuditTab() {
 /* ================= Settings page ================= */
 
 export default function Settings() {
-  const { isAdmin, isManager } = useAuth();
-  const [tab, setTab] = useState(isAdmin ? 'ai' : 'audit');
+  const { isAdmin } = useAuth();
+  const [tab, setTab] = useState('ai');
 
+  // Settings is admin-only (route-gated too); the audit log lives here so
+  // only the admin ever sees login attempts and the audit trail.
   const tabs = [
     isAdmin && { id: 'ai', label: '🤖 AI' },
     isAdmin && { id: 'whatsapp', label: '💬 WhatsApp' },
     isAdmin && { id: 'users', label: '👥 Users' },
-    isManager && { id: 'audit', label: '📜 Audit log' },
+    isAdmin && { id: 'audit', label: '📜 Audit log' },
   ].filter(Boolean);
 
   return (
@@ -448,7 +450,7 @@ export default function Settings() {
       {tab === 'ai' && isAdmin && <AiTab />}
       {tab === 'whatsapp' && isAdmin && <WhatsappTab />}
       {tab === 'users' && isAdmin && <UsersTab />}
-      {tab === 'audit' && isManager && <AuditTab />}
+      {tab === 'audit' && isAdmin && <AuditTab />}
     </>
   );
 }

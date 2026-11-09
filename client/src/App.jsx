@@ -21,9 +21,11 @@ function RequireAuth({ children }) {
   return children;
 }
 
+// Settings (users, audit log, AI/WhatsApp config) is admin-only. The server
+// enforces this too; the gate just keeps the nav honest.
 function SettingsGate({ children }) {
   const { user } = useAuth();
-  if (user?.role !== 'admin' && user?.role !== 'manager') return <Navigate to="/" replace />;
+  if (user?.role !== 'admin') return <Navigate to="/" replace />;
   return children;
 }
 

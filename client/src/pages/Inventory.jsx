@@ -3,23 +3,34 @@ import { Link, useParams } from 'react-router-dom';
 import { get, post, put, del, qs, asArray } from '../api';
 import {
   PageHeader, Card, Badge, Modal, EmptyState, Spinner, Alert, Field,
-  pkr, areaStr, fmtDateTime, prettyLabel, BackLink,
+  pkr, areaStr, fmtDateTime, prettyLabel, BackLink, WaButton,
 } from '../components/ui';
 import DealModal from '../components/DealModal';
 import { DocumentsPanel } from './Contacts';
 
-const PROP_TYPES = ['plot', 'residential', 'commercial'];
+const PROP_TYPES = ['plot', 'house', 'commercial_land', 'agriculture_land', 'shop', 'commercial_building'];
 const PROP_STATUSES = ['Available', 'Booked', 'Sold', 'Blocked'];
 
 function PropertyForm({ initial, onSaved, onCancel }) {
   const [f, setF] = useState({
     code: '', type: 'plot', title: '', location: '', areaValue: '', areaUnit: 'marla',
-    price: '', status: 'Available', description: '',
+    price: '', listingType: 'sale', description: '',
     ...(initial || {}),
   });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [sellerContacts, setSellerContacts] = useState([]);
+  const [sellerQ, setSellerQ] = useState(initial?.seller?.name || '');
+  const [sellerId, setSellerId] = useState(initial?.sellerContactId || initial?.seller?.id || '');
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  const searchSellers = async (value) => {
+    setSellerQ(value);
+    if (value.trim().length < 2) return;
+    try {
+      setSellerContacts(asArray(await get('/api/contacts' + qs({ q: value.trim() }))));
+    } catch { /* ignore */ }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -30,6 +41,7 @@ function PropertyForm({ initial, onSaved, onCancel }) {
       const payload = { ...f };
       if (payload.areaValue === '') delete payload.areaValue; else payload.areaValue = Number(payload.areaValue);
       if (payload.price === '') delete payload.price; else payload.price = Number(payload.price);
+      if (sellerId) payload.sellerContactId = sellerId;
       Object.keys(payload).forEach((k) => { if (payload[k] === '') delete payload[k]; });
       if (initial?.id) await put(`/api/properties/${initial.id}`, payload);
       else await post('/api/properties', payload);
@@ -46,9 +58,9 @@ function PropertyForm({ initial, onSaved, onCancel }) {
       {error && <Alert kind="error">{error}</Alert>}
       <div className="form-row">
         <Field label="Code" hint="e.g. DHA-P9-142"><input className="input" value={f.code} onChange={set('code')} /></Field>
-        <Field label="Status">
-          <select className="select" value={f.status} onChange={set('status')}>
-            {PROP_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+        <Field label="Listing purpose">
+          <select className="select" value={f.listingType || 'sale'} onChange={set('listingType')}>
+            <option value="sale">🏷️ For Sale</option>
           </select>
         </Field>
       </div>
@@ -72,7 +84,27 @@ function PropertyForm({ initial, onSaved, onCancel }) {
         </Field>
       </div>
       <Field label="Price (PKR)"><input className="input" type="number" min="0" value={f.price} onChange={set('price')} placeholder="e.g. 8500000" /></Field>
+      <Field label="Owner / seller (contact)">
+        <input
+          className="input" list="seller-list" placeholder="Type to search contacts…"
+          value={sellerQ}
+          onChange={(e) => {
+            searchSellers(e.target.value);
+            const match = sellerContacts.find((c) => c.name === e.target.value);
+            setSellerId(match ? String(match.id) : '');
+          }}
+        />
+        <datalist id="seller-list">
+          {sellerContacts.map((c) => <option key={c.id} value={c.name}>{c.phone || ''}</option>)}
+        </datalist>
+        <div className="hint">The person selling this property — shown on the property page.</div>
+      </Field>
       <Field label="Description"><textarea className="textarea" value={f.description} onChange={set('description')} /></Field>
+      {!initial?.id && (
+        <div className="hint" style={{ marginBottom: 8 }}>
+          Listed “For Sale” — the property goes straight into inventory as Available.
+        </div>
+      )}
       <div className="modal-foot">
         <button type="button" className="btn btn-secondary" onClick={onCancel}>Cancel</button>
         <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving…' : (initial?.id ? 'Save changes' : 'Add property')}</button>
@@ -202,6 +234,10 @@ export function PropertyDetail() {
   const [showEdit, setShowEdit] = useState(false);
   const [showDeal, setShowDeal] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
+  const [sellerContacts, setSellerContacts] = useState([]);
+  const [sellerQ, setSellerQ] = useState('');
+  const [sellerId, setSellerId] = useState('');
+  const [sellerBusy, setSellerBusy] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -257,6 +293,42 @@ export function PropertyDetail() {
     }
   };
 
+  const searchSellers = async (value) => {
+    setSellerQ(value);
+    if (value.trim().length < 2) return;
+    try {
+      setSellerContacts(asArray(await get('/api/contacts' + qs({ q: value.trim() }))));
+    } catch { /* ignore */ }
+  };
+
+  const linkSeller = async () => {
+    if (!sellerId) { setNotice('Pick a contact to link as owner/seller.'); return; }
+    setSellerBusy(true);
+    setNotice('');
+    try {
+      const res = await post(`/api/properties/${id}/seller`, { contactId: sellerId });
+      setProp(res.property || res);
+      setSellerQ(''); setSellerId('');
+    } catch (e) {
+      setNotice(e.message);
+    } finally {
+      setSellerBusy(false);
+    }
+  };
+
+  const unlinkSeller = async () => {
+    setSellerBusy(true);
+    setNotice('');
+    try {
+      const res = await post(`/api/properties/${id}/seller`, { contactId: null });
+      setProp(res.property || res);
+    } catch (e) {
+      setNotice(e.message);
+    } finally {
+      setSellerBusy(false);
+    }
+  };
+
   if (loading) return <Spinner />;
   if (error) return (<><BackLink to="/inventory" label="Inventory" /><Alert kind="error">{error}</Alert></>);
   if (!prop) return (<><BackLink to="/inventory" label="Inventory" /><Alert kind="error">Property not found.</Alert></>);
@@ -290,11 +362,53 @@ export function PropertyDetail() {
           <dl className="kv">
             <dt>Status</dt><dd><Badge status={prop.status} /></dd>
             <dt>Type</dt><dd>{prettyLabel(prop.type)}</dd>
+            <dt>Listing</dt><dd>{prop.listingType === 'sale' ? '🏷️ For Sale' : prettyLabel(prop.listingType || 'sale')}</dd>
             <dt>Location</dt><dd>{prop.location || '—'}</dd>
             <dt>Area</dt><dd>{areaStr(prop.areaValue, prop.areaUnit)}</dd>
             <dt>Price</dt><dd><strong>{prop.price ? pkr(prop.price) : 'Price on request'}</strong></dd>
             <dt>Description</dt><dd>{prop.description || '—'}</dd>
           </dl>
+        </Card>
+
+        <Card title="Owner / seller">
+          {prop.seller ? (
+            <>
+              <dl className="kv">
+                <dt>Name</dt><dd><Link to={`/contacts/${prop.seller.id}`}><strong>{prop.seller.name}</strong></Link></dd>
+                <dt>Phone</dt><dd>{prop.seller.phone || '—'}</dd>
+                <dt>WhatsApp</dt><dd>{prop.seller.whatsapp || prop.seller.phone || '—'}</dd>
+                <dt>Email</dt><dd>{prop.seller.email || '—'}</dd>
+                <dt>Type</dt><dd><Badge status={prop.seller.type || 'seller'} /></dd>
+              </dl>
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <WaButton phone={prop.seller.whatsapp || prop.seller.phone} name={prop.seller.name} className="btn btn-secondary btn-sm" />
+                <button className="btn btn-ghost btn-sm" onClick={unlinkSeller} disabled={sellerBusy}>
+                  {sellerBusy ? 'Unlinking…' : 'Unlink owner'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <EmptyState icon="👤" title="No owner linked" hint="Link the contact who owns or is selling this property." />
+              <Field label="Link owner / seller">
+                <input
+                  className="input" list="detail-seller-list" placeholder="Type to search contacts…"
+                  value={sellerQ}
+                  onChange={(e) => {
+                    searchSellers(e.target.value);
+                    const match = sellerContacts.find((c) => c.name === e.target.value);
+                    setSellerId(match ? String(match.id) : '');
+                  }}
+                />
+                <datalist id="detail-seller-list">
+                  {sellerContacts.map((c) => <option key={c.id} value={c.name}>{c.phone || ''}</option>)}
+                </datalist>
+              </Field>
+              <button className="btn btn-primary btn-sm" onClick={linkSeller} disabled={sellerBusy || !sellerId}>
+                {sellerBusy ? 'Linking…' : 'Link owner'}
+              </button>
+            </>
+          )}
         </Card>
 
         <Card title="Change status">

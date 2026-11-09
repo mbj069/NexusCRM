@@ -9,18 +9,25 @@ import { auditReq } from '../audit.js';
 import { ah, httpError, uid } from '../util.js';
 
 const router = Router();
-router.use(requireAuth, requirePermission('manage_users'));
+router.use(requireAuth);
 
 const VALID_ROLES = ['admin', 'manager', 'agent'];
 
-// GET /api/users
-router.get('/', ah(async (req, res) => {
+// GET /api/users/agents — id + name of every agent, for lead assignment.
+// Manager/admin only (assign_leads); deliberately NOT the full user list.
+router.get('/agents', requirePermission('assign_leads'), ah(async (req, res) => {
+  const rows = await db.prepare("SELECT id, name, username FROM users WHERE role = 'agent' ORDER BY name").all();
+  res.json(rows.map(camel));
+}));
+
+// GET /api/users — admin only
+router.get('/', requirePermission('manage_users'), ah(async (req, res) => {
   const rows = await db.prepare('SELECT * FROM users ORDER BY created_at').all();
   res.json(rows.map(mapUser));
 }));
 
-// POST /api/users { username, password, name, role }
-router.post('/', ah(async (req, res) => {
+// POST /api/users { username, password, name, role } — admin only
+router.post('/', requirePermission('manage_users'), ah(async (req, res) => {
   const { username, password, name, role } = req.body || {};
   if (!username?.trim() || !password || !name?.trim()) throw httpError(400, 'Username, password and name are required.');
   if (String(password).length < 8) throw httpError(400, 'Password must be at least 8 characters.');
@@ -35,8 +42,8 @@ router.post('/', ah(async (req, res) => {
   res.status(201).json(mapUser(await db.prepare('SELECT * FROM users WHERE id = ?').get(id)));
 }));
 
-// PUT /api/users/:id { name, role, password? }
-router.put('/:id', ah(async (req, res) => {
+// PUT /api/users/:id { name, role, password? } — admin only
+router.put('/:id', requirePermission('manage_users'), ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'User not found.');
   const { name, role, password } = req.body || {};
@@ -66,8 +73,8 @@ router.put('/:id', ah(async (req, res) => {
   res.json(mapUser(await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id)));
 }));
 
-// DELETE /api/users/:id
-router.delete('/:id', ah(async (req, res) => {
+// DELETE /api/users/:id — admin only
+router.delete('/:id', requirePermission('manage_users'), ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'User not found.');
   if (row.id === req.user.sub) throw httpError(400, 'You cannot delete your own account.');

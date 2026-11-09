@@ -177,6 +177,8 @@ export async function initSchema() {
       source TEXT NOT NULL DEFAULT 'manual'
         CHECK (source IN ('website','WhatsApp','social','manual','referral')),
       interest TEXT NOT NULL DEFAULT '',
+      intent TEXT NOT NULL DEFAULT 'buy' CHECK (intent IN ('buy','sell')),
+      society TEXT NOT NULL DEFAULT '',
       budget_min REAL NOT NULL DEFAULT 0,
       budget_max REAL NOT NULL DEFAULT 0,
       stage TEXT NOT NULL DEFAULT 'new'
@@ -185,12 +187,15 @@ export async function initSchema() {
       ai_score REAL,
       ai_score_reason TEXT NOT NULL DEFAULT '',
       owner_id TEXT REFERENCES users(id),
+      assigned_to TEXT REFERENCES users(id),
       notes TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
     CREATE INDEX IF NOT EXISTS idx_leads_owner ON leads(owner_id);
+    -- idx_leads_assigned / idx_leads_intent / idx_leads_society are created
+    -- by migrateV11 (after the columns exist on upgraded databases).
 
     CREATE TABLE IF NOT EXISTS activities (
       id TEXT PRIMARY KEY,
@@ -219,7 +224,7 @@ export async function initSchema() {
     CREATE TABLE IF NOT EXISTS properties (
       id TEXT PRIMARY KEY,
       code TEXT UNIQUE NOT NULL,
-      type TEXT NOT NULL CHECK (type IN ('plot','residential','commercial')),
+      type TEXT NOT NULL CHECK (type IN ('plot','house','commercial_land','agriculture_land','shop','commercial_building')),
       title TEXT NOT NULL,
       location TEXT NOT NULL DEFAULT '',
       area_value REAL NOT NULL DEFAULT 0,
@@ -229,11 +234,15 @@ export async function initSchema() {
         CHECK (status IN ('Available','Booked','Sold','Blocked')),
       description TEXT NOT NULL DEFAULT '',
       owner_id TEXT REFERENCES users(id),
+      listing_type TEXT NOT NULL DEFAULT 'sale' CHECK (listing_type IN ('sale')),
+      seller_contact_id TEXT REFERENCES contacts(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_properties_status ON properties(status);
     CREATE INDEX IF NOT EXISTS idx_properties_code ON properties(code);
+    -- idx_properties_type / idx_properties_seller are created by migrateV11
+    -- (after the columns exist on upgraded databases).
 
     CREATE TABLE IF NOT EXISTS deals (
       id TEXT PRIMARY KEY,
@@ -258,8 +267,9 @@ export async function initSchema() {
       deal_id TEXT NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
       contact_id TEXT NOT NULL REFERENCES contacts(id),
       total_amount REAL NOT NULL DEFAULT 0,
-      down_payment REAL NOT NULL DEFAULT 0,
-      possession_amount REAL NOT NULL DEFAULT 0,
+      token_amount REAL NOT NULL DEFAULT 0,
+      bayana_amount REAL NOT NULL DEFAULT 0,
+      final_amount REAL NOT NULL DEFAULT 0,
       num_installments INTEGER NOT NULL DEFAULT 0,
       installment_amount REAL NOT NULL DEFAULT 0,
       start_date TEXT NOT NULL,
@@ -272,7 +282,7 @@ export async function initSchema() {
       seq INTEGER NOT NULL,
       due_date TEXT NOT NULL,
       amount REAL NOT NULL DEFAULT 0,
-      kind TEXT NOT NULL CHECK (kind IN ('down_payment','installment','possession')),
+      kind TEXT NOT NULL CHECK (kind IN ('token','bayana','installment','final')),
       status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid')),
       paid_at TEXT
     );
@@ -306,6 +316,7 @@ export async function initSchema() {
       amount REAL NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid')),
       paid_at TEXT,
+      manual INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_commissions_agent ON commissions(agent_id);
@@ -376,17 +387,161 @@ export async function initSchema() {
   // Upload storage columns (added idempotently for databases created
   // before this migration). `url` = Vercel Blob public URL when Blob is
   // configured; `data` = raw file bytes when stored in the database.
-  const cols = await db.prepare('PRAGMA table_info(documents)').all();
-  const names = new Set(cols.map((c) => c.name));
-  if (!names.has('data')) {
+  const docCols = await db.prepare('PRAGMA table_info(documents)').all();
+  const docNames = new Set(docCols.map((c) => c.name));
+  if (!docNames.has('data')) {
     await db.exec('ALTER TABLE documents ADD COLUMN data BLOB');
   }
-  if (!names.has('url')) {
+  if (!docNames.has('url')) {
     await db.exec('ALTER TABLE documents ADD COLUMN url TEXT');
   }
 
+  await migrateV11();
+
   await db.prepare('INSERT OR IGNORE INTO ai_config (id) VALUES (1)').run();
   await db.prepare('INSERT OR IGNORE INTO whatsapp_config (id) VALUES (1)').run();
+}
+
+// --- v1.1 migrations --------------------------------------------------------
+// All steps are idempotent: they inspect the live schema first and only
+// change what is still on the old shape, so a fresh database (created by
+// the CREATE TABLE block above) and an upgraded v1.0 database end up
+// identical, with no data loss.
+
+async function tableColumns(table) {
+  const rows = await db.prepare(`PRAGMA table_info(${table})`).all();
+  return new Set(rows.map((c) => c.name));
+}
+
+async function tableSql(table) {
+  const row = await db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?"
+  ).get(table);
+  return row?.sql || '';
+}
+
+async function addColumnIfMissing(table, columnDef, columnName) {
+  const cols = await tableColumns(table);
+  if (!cols.has(columnName)) {
+    await db.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`);
+  }
+}
+
+async function migrateV11() {
+  // --- Leads: intent, society, assignment ---------------------------------
+  await addColumnIfMissing('leads', "intent TEXT NOT NULL DEFAULT 'buy' CHECK (intent IN ('buy','sell'))", 'intent');
+  await addColumnIfMissing('leads', "society TEXT NOT NULL DEFAULT ''", 'society');
+  await addColumnIfMissing('leads', 'assigned_to TEXT REFERENCES users(id)', 'assigned_to');
+  // Existing leads were owned by their creator; carry that over as the
+  // assignee so nothing becomes unassigned by the upgrade.
+  await db.prepare('UPDATE leads SET assigned_to = owner_id WHERE assigned_to IS NULL AND owner_id IS NOT NULL').run();
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_assigned ON leads(assigned_to)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_intent ON leads(intent)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_society ON leads(society)');
+
+  // --- Properties: six types + listing purpose + seller contact -----------
+  // The type CHECK changed, which SQLite cannot ALTER — rebuild the table
+  // when the old CHECK ('residential' / 'commercial') is still present.
+  const propSql = await tableSql('properties');
+  if (propSql.includes("'residential'")) {
+    await client.execute('PRAGMA foreign_keys = OFF');
+    try {
+      await db.exec(`
+        CREATE TABLE properties_new (
+          id TEXT PRIMARY KEY,
+          code TEXT UNIQUE NOT NULL,
+          type TEXT NOT NULL CHECK (type IN ('plot','house','commercial_land','agriculture_land','shop','commercial_building')),
+          title TEXT NOT NULL,
+          location TEXT NOT NULL DEFAULT '',
+          area_value REAL NOT NULL DEFAULT 0,
+          area_unit TEXT NOT NULL DEFAULT 'marla' CHECK (area_unit IN ('marla','kanal','sqft')),
+          price REAL NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'Available'
+            CHECK (status IN ('Available','Booked','Sold','Blocked')),
+          description TEXT NOT NULL DEFAULT '',
+          owner_id TEXT REFERENCES users(id),
+          listing_type TEXT NOT NULL DEFAULT 'sale' CHECK (listing_type IN ('sale')),
+          seller_contact_id TEXT REFERENCES contacts(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO properties_new (id, code, type, title, location, area_value, area_unit, price,
+            status, description, owner_id, listing_type, seller_contact_id, created_at, updated_at)
+          SELECT id, code,
+            CASE type WHEN 'residential' THEN 'house' WHEN 'commercial' THEN 'commercial_building' ELSE type END,
+            title, location, area_value, area_unit, price, status, description, owner_id,
+            'sale', NULL, created_at, updated_at
+          FROM properties;
+        DROP TABLE properties;
+        ALTER TABLE properties_new RENAME TO properties;
+      `);
+    } finally {
+      await client.execute('PRAGMA foreign_keys = ON');
+    }
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_status ON properties(status)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_code ON properties(code)');
+  }
+  await addColumnIfMissing('properties', "listing_type TEXT NOT NULL DEFAULT 'sale' CHECK (listing_type IN ('sale'))", 'listing_type');
+  await addColumnIfMissing('properties', 'seller_contact_id TEXT REFERENCES contacts(id) ON DELETE SET NULL', 'seller_contact_id');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_type ON properties(type)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_seller ON properties(seller_contact_id)');
+
+  // --- Payment plans: Token → Bayana → Installments → Final ----------------
+  await addColumnIfMissing('payment_plans', 'token_amount REAL NOT NULL DEFAULT 0', 'token_amount');
+  await addColumnIfMissing('payment_plans', 'bayana_amount REAL NOT NULL DEFAULT 0', 'bayana_amount');
+  await addColumnIfMissing('payment_plans', 'final_amount REAL NOT NULL DEFAULT 0', 'final_amount');
+  const planCols = await tableColumns('payment_plans');
+  if (planCols.has('down_payment')) {
+    await db.prepare('UPDATE payment_plans SET token_amount = down_payment WHERE token_amount = 0').run();
+  }
+  if (planCols.has('possession_amount')) {
+    await db.prepare('UPDATE payment_plans SET final_amount = possession_amount WHERE final_amount = 0').run();
+  }
+  await db.prepare(`UPDATE payment_plans SET bayana_amount =
+    COALESCE((SELECT bayana_amount FROM deals WHERE deals.id = payment_plans.deal_id), 0)
+    WHERE bayana_amount = 0`).run();
+  // Retire the old columns; failure is non-fatal (stale columns are
+  // simply ignored by the new code).
+  for (const oldCol of ['down_payment', 'possession_amount']) {
+    if ((await tableColumns('payment_plans')).has(oldCol)) {
+      try { await db.exec(`ALTER TABLE payment_plans DROP COLUMN ${oldCol}`); }
+      catch (e) { console.error(`migrate: could not drop payment_plans.${oldCol}:`, e.message); }
+    }
+  }
+
+  // --- Payment schedule: stage kinds ---------------------------------------
+  const schedSql = await tableSql('payment_schedule');
+  if (schedSql.includes("'down_payment'")) {
+    await client.execute('PRAGMA foreign_keys = OFF');
+    try {
+      await db.exec(`
+        CREATE TABLE payment_schedule_new (
+          id TEXT PRIMARY KEY,
+          plan_id TEXT NOT NULL REFERENCES payment_plans(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          due_date TEXT NOT NULL,
+          amount REAL NOT NULL DEFAULT 0,
+          kind TEXT NOT NULL CHECK (kind IN ('token','bayana','installment','final')),
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid')),
+          paid_at TEXT
+        );
+        INSERT INTO payment_schedule_new (id, plan_id, seq, due_date, amount, kind, status, paid_at)
+          SELECT id, plan_id, seq, due_date, amount,
+            CASE kind WHEN 'down_payment' THEN 'token' WHEN 'possession' THEN 'final' ELSE kind END,
+            status, paid_at
+          FROM payment_schedule;
+        DROP TABLE payment_schedule;
+        ALTER TABLE payment_schedule_new RENAME TO payment_schedule;
+      `);
+    } finally {
+      await client.execute('PRAGMA foreign_keys = ON');
+    }
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_schedule_plan ON payment_schedule(plan_id)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_schedule_due ON payment_schedule(due_date, status)');
+  }
+
+  // --- Commissions: manual override flag ------------------------------------
+  await addColumnIfMissing('commissions', 'manual INTEGER NOT NULL DEFAULT 0', 'manual');
 }
 
 // --- Row mappers (snake_case -> camelCase) ----------------------------------

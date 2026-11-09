@@ -10,6 +10,30 @@ import { ah, httpError, uid, todayStr } from '../util.js';
 const ENTITY_TYPES = ['lead', 'contact', 'deal'];
 const ACTIVITY_KINDS = ['note', 'call', 'viewing', 'message', 'stage_change'];
 
+const isAgent = (req) => req.user.role === 'agent';
+
+// Agents may only touch activities/follow-ups on entities they can see:
+// their assigned leads, their own deals, contacts linked to their own
+// leads/deals.
+async function assertEntityVisible(req, entityType, entityId) {
+  if (!isAgent(req)) return;
+  const me = req.user.sub;
+  if (entityType === 'lead') {
+    const row = await db.prepare('SELECT assigned_to FROM leads WHERE id = ?').get(entityId);
+    if (!row || row.assigned_to !== me) throw httpError(403, 'Lead not assigned to you.');
+  } else if (entityType === 'deal') {
+    const row = await db.prepare('SELECT agent_id FROM deals WHERE id = ?').get(entityId);
+    if (!row || row.agent_id !== me) throw httpError(403, 'Deal not assigned to you.');
+  } else if (entityType === 'contact') {
+    const row = await db.prepare(`SELECT id FROM contacts WHERE id = ? AND (
+        id IN (SELECT contact_id FROM leads WHERE assigned_to = ?)
+        OR id IN (SELECT l.contact_id FROM leads l JOIN deals d ON d.lead_id = l.id WHERE d.agent_id = ?)
+        OR id IN (SELECT pp.contact_id FROM payment_plans pp JOIN deals d ON d.id = pp.deal_id WHERE d.agent_id = ?))`)
+      .get(entityId, me, me, me);
+    if (!row) throw httpError(403, 'Contact not linked to your leads or deals.');
+  }
+}
+
 // --- Activities ------------------------------------------------------------
 
 export const activitiesRouter = Router();
@@ -19,6 +43,7 @@ activitiesRouter.use(requireAuth, requirePermission('crm'));
 activitiesRouter.get('/:entityType/:entityId', ah(async (req, res) => {
   const { entityType, entityId } = req.params;
   if (!ENTITY_TYPES.includes(entityType)) throw httpError(400, 'Invalid entity type.');
+  await assertEntityVisible(req, entityType, entityId);
   const rows = await db.prepare(`SELECT a.*, u.name AS actor_name FROM activities a
     LEFT JOIN users u ON u.id = a.actor_id
     WHERE a.entity_type = ? AND a.entity_id = ? ORDER BY a.created_at DESC`)
@@ -33,6 +58,7 @@ activitiesRouter.post('/', ah(async (req, res) => {
   if (!ACTIVITY_KINDS.includes(kind)) throw httpError(400, `Kind must be one of: ${ACTIVITY_KINDS.join(', ')}.`);
   if (!entityId) throw httpError(400, 'Entity id is required.');
   if (!text?.trim()) throw httpError(400, 'Text is required.');
+  await assertEntityVisible(req, entityType, entityId);
   const id = uid();
   await db.prepare('INSERT INTO activities (id, entity_type, entity_id, actor_id, kind, text) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, entityType, entityId, req.user.sub, kind, text.trim());
@@ -51,7 +77,8 @@ followupsRouter.get('/', ah(async (req, res) => {
   const where = [];
   const params = [];
   if (overdue === '1') { where.push('done = 0 AND due_date < ?'); params.push(todayStr()); }
-  if (mine === '1') { where.push('owner_id = ?'); params.push(req.user.sub); }
+  // Agents only ever see their own follow-ups.
+  if (mine === '1' || isAgent(req)) { where.push('owner_id = ?'); params.push(req.user.sub); }
   const sql = `SELECT f.*, u.name AS owner_name FROM followups f
     LEFT JOIN users u ON u.id = f.owner_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY f.due_date`;
@@ -65,6 +92,7 @@ followupsRouter.post('/', ah(async (req, res) => {
   if (!entityId) throw httpError(400, 'Entity id is required.');
   if (!title?.trim()) throw httpError(400, 'Title is required.');
   if (!dueDate || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) throw httpError(400, 'dueDate must be YYYY-MM-DD.');
+  await assertEntityVisible(req, entityType, entityId);
   const id = uid();
   await db.prepare('INSERT INTO followups (id, entity_type, entity_id, title, due_date, owner_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, entityType, entityId, title.trim(), dueDate, req.user.sub);
@@ -76,6 +104,7 @@ followupsRouter.post('/', ah(async (req, res) => {
 followupsRouter.put('/:id', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM followups WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Follow-up not found.');
+  if (isAgent(req) && row.owner_id !== req.user.sub) throw httpError(403, 'Not your follow-up.');
   const { title, dueDate, done } = req.body || {};
   if (title !== undefined && !String(title).trim()) throw httpError(400, 'Title cannot be empty.');
   if (dueDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) throw httpError(400, 'dueDate must be YYYY-MM-DD.');
@@ -91,6 +120,7 @@ followupsRouter.put('/:id', ah(async (req, res) => {
 followupsRouter.delete('/:id', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM followups WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Follow-up not found.');
+  if (isAgent(req) && row.owner_id !== req.user.sub) throw httpError(403, 'Not your follow-up.');
   await db.prepare('DELETE FROM followups WHERE id = ?').run(req.params.id);
   auditReq(req, 'FOLLOWUP_DELETE', { entityType: row.entity_type, entityId: row.entity_id, details: `Deleted follow-up "${row.title}".` });
   res.json({ ok: true });

@@ -37,7 +37,10 @@ router.post('/:id/read', ah(async (req, res) => {
 router.post('/scan-overdue', ah(async (req, res) => {
   const today = todayStr();
   const rows = await db.prepare(`SELECT s.id, s.seq, s.kind, s.due_date, s.amount, c.name AS contact_name,
-      pr.code AS property_code FROM payment_schedule s
+      pr.code AS property_code,
+      (SELECT COUNT(*) FROM payment_schedule s2
+        WHERE s2.plan_id = s.plan_id AND s2.kind = 'installment' AND s2.seq <= s.seq) AS inst_idx
+    FROM payment_schedule s
     JOIN payment_plans pp ON pp.id = s.plan_id
     JOIN contacts c ON c.id = pp.contact_id
     LEFT JOIN deals d ON d.id = pp.deal_id
@@ -51,7 +54,7 @@ router.post('/scan-overdue', ah(async (req, res) => {
     const paid = (await db.prepare('SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE schedule_id = ?').get(r.id)).s;
     const outstanding = r.amount - paid;
     if (outstanding <= 0.01) continue;
-    const kindLabel = { down_payment: 'down payment', installment: `installment #${r.seq}`, possession: 'possession amount' }[r.kind] || r.kind;
+    const kindLabel = { token: 'token money', bayana: 'bayana', installment: `installment #${r.inst_idx}`, final: 'final payment' }[r.kind] || r.kind;
     const days = daysBetween(today, r.due_date);
     await db.prepare(`INSERT INTO notifications (id, user_id, kind, title, body, link)
       VALUES (?, NULL, 'overdue_installment', ?, ?, ?)`)

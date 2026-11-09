@@ -1,4 +1,4 @@
-# NexusCRM v1
+# NexusCRM v1.1
 
 A generic CRM with a property-dealer module. The core (contacts, leads, pipeline,
 follow-ups, users, analytics) works for any small business; the property module
@@ -6,6 +6,18 @@ follow-ups, users, analytics) works for any small business; the property module
 with a double-booking guard, payment plans, installments, receipts, client ledgers,
 commissions) is built for property dealers. Trust Property Real Estate Agency
 (Sargodha) is the demo dataset's agency — customer #1, not the whole product.
+
+v1.1 adds: leads with BUY/SELL intent and society filters; lead assignment to
+agents with server-side agent scoping (agents see only their assigned leads,
+own deals, own commissions); six inventory types (plot, house, commercial
+land, agriculture land, shop, commercial building); properties listed "For
+Sale" straight into inventory; owner/seller cards on property pages with
+link/unlink; the Token → Bayana → Installments (optional) → Final payment
+hierarchy with the final payment auto-computed as the remainder; admin-only
+manual commission overrides (audit-logged); role-specific dashboards (admin
+sees full money totals, manager sees the team view with no grand totals,
+agents see only their own numbers); and every login attempt — success and
+failure — written to the audit log (admin-only to view).
 
 Stack: React (Vite) frontend · Express backend · Turso (libSQL) database —
 remote Turso in production, local libSQL file in development · bcrypt password
@@ -219,6 +231,16 @@ property; commissions (percent/fixed, pending/paid, agent-scoped views);
 document uploads per deal/contact/lead; notifications + overdue scan; dashboard
 (revenue, funnel, inventory, agent performance, overdue); AI gateway (lead
 scoring assist, summaries); WhatsApp webhook plumbing + wa.me fallback.
+
+**v1.1 — shipped:** leads with BUY/SELL intent + society filters and
+assignment to agents (agents see only assigned leads, own deals, own
+commissions — enforced server-side); six inventory types with type filter;
+"For Sale" listings straight into inventory; owner/seller card on property
+detail with link/unlink; payment hierarchy Token → Bayana → Installments
+(optional) → Final (auto-computed remainder); admin-only manual commission
+override (audit-logged); role-specific dashboards (admin full totals, manager
+team view without money totals, agent own numbers only); login attempts
+(success and failure) in the audit log, admin-only to view.
 
 **v2 — deliberately deferred:** full 24/7 AI chat automation on WhatsApp
 (needs the client's Meta approval above); social-channel lead capture; richer

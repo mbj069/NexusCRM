@@ -14,6 +14,21 @@ router.use(requireAuth, requirePermission('crm'));
 
 const VALID_METHODS = ['cash', 'bank', 'transfer'];
 
+const isAgent = (req) => req.user.role === 'agent';
+
+// Stage labels for the Token → Bayana → Installments → Final hierarchy.
+// Installments are numbered by their position among installment rows
+// (seq counts all stages, so it is not the installment number).
+async function stageLabel(sched) {
+  if (!sched) return '';
+  if (sched.kind === 'installment') {
+    const n = (await db.prepare(`SELECT COUNT(*) AS n FROM payment_schedule
+      WHERE plan_id = ? AND kind = 'installment' AND seq <= ?`).get(sched.plan_id, sched.seq)).n;
+    return `Installment #${n}`;
+  }
+  return { token: 'Token money', bayana: 'Bayana', final: 'Final payment' }[sched.kind] || sched.kind;
+}
+
 /** Next receipt number for the current year, inside an open transaction. */
 async function nextReceiptNo(tx) {
   const year = new Date().getFullYear();
@@ -37,6 +52,11 @@ router.post('/', ah(async (req, res) => {
   await withTransaction(async (tx) => {
     const sched = await tx.prepare('SELECT * FROM payment_schedule WHERE id = ?').get(scheduleId);
     if (!sched) throw httpError(404, 'Schedule row not found.');
+    if (isAgent(req)) {
+      const deal = await tx.prepare(`SELECT d.agent_id FROM deals d
+        JOIN payment_plans pp ON pp.deal_id = d.id WHERE pp.id = ?`).get(sched.plan_id);
+      if (!deal || deal.agent_id !== req.user.sub) throw httpError(403, 'Cannot record a payment on another agent\u2019s deal.');
+    }
     receiptNo = await nextReceiptNo(tx);
     await tx.prepare(`INSERT INTO payments (id, plan_id, schedule_id, amount, method, received_by, receipt_no, notes)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -58,16 +78,22 @@ router.post('/', ah(async (req, res) => {
 // GET /api/payments?planId=
 router.get('/', ah(async (req, res) => {
   const { planId } = req.query;
-  const sql = planId
-    ? `SELECT p.*, u.name AS received_by_name FROM payments p LEFT JOIN users u ON u.id = p.received_by
-       WHERE p.plan_id = ? ORDER BY p.created_at DESC`
-    : `SELECT p.*, u.name AS received_by_name FROM payments p LEFT JOIN users u ON u.id = p.received_by
-       ORDER BY p.created_at DESC LIMIT 200`;
-  res.json(((planId ? await db.prepare(sql).all(planId) : await db.prepare(sql).all())).map(camel));
+  const where = [];
+  const params = [];
+  if (planId) { where.push('p.plan_id = ?'); params.push(planId); }
+  if (isAgent(req)) {
+    where.push('p.plan_id IN (SELECT pp.id FROM payment_plans pp JOIN deals d ON d.id = pp.deal_id WHERE d.agent_id = ?)');
+    params.push(req.user.sub);
+  }
+  const sql = `SELECT p.*, u.name AS received_by_name FROM payments p
+    LEFT JOIN users u ON u.id = p.received_by
+    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY p.created_at DESC LIMIT 200`;
+  res.json((await db.prepare(sql).all(...params)).map(camel));
 }));
 
 // Shared receipt payload
-async function receiptData(paymentId) {
+async function receiptData(paymentId, req) {
   const p = await db.prepare(`SELECT p.*, u.name AS received_by_name FROM payments p
     LEFT JOIN users u ON u.id = p.received_by WHERE p.id = ?`).get(paymentId);
   if (!p) throw httpError(404, 'Payment not found.');
@@ -75,8 +101,11 @@ async function receiptData(paymentId) {
   const sched = await db.prepare('SELECT * FROM payment_schedule WHERE id = ?').get(p.schedule_id);
   const contact = plan ? await db.prepare('SELECT * FROM contacts WHERE id = ?').get(plan.contact_id) : null;
   const deal = plan ? await db.prepare('SELECT * FROM deals WHERE id = ?').get(plan.deal_id) : null;
+  if (req && isAgent(req) && (!deal || deal.agent_id !== req.user.sub)) {
+    throw httpError(403, 'Receipt not on one of your deals.');
+  }
   const property = deal?.property_id ? await db.prepare('SELECT * FROM properties WHERE id = ?').get(deal.property_id) : null;
-  const kindLabel = { down_payment: 'Down payment', installment: `Installment #${sched?.seq ?? ''}`, possession: 'Possession amount' }[sched?.kind] || sched?.kind || '';
+  const kindLabel = await stageLabel(sched);
   return {
     receiptNo: p.receipt_no,
     date: p.created_at,
@@ -100,12 +129,12 @@ receiptsRouter.use(requireAuth, requirePermission('crm'));
 
 // GET /api/receipts/:paymentId — receipt JSON
 receiptsRouter.get('/:paymentId', ah(async (req, res) => {
-  res.json(await receiptData(req.params.paymentId));
+  res.json(await receiptData(req.params.paymentId, req));
 }));
 
 // GET /api/receipts/:paymentId/html — printable HTML receipt, no external assets
 receiptsRouter.get('/:paymentId/html', ah(async (req, res) => {
-  const r = await receiptData(req.params.paymentId);
+  const r = await receiptData(req.params.paymentId, req);
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const html = `<!DOCTYPE html>
 <html lang="en">

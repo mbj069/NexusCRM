@@ -41,6 +41,9 @@ export function AuthProvider({ children }) {
     changePassword,
     isAdmin: user?.role === 'admin',
     isManager: user?.role === 'manager' || user?.role === 'admin',
+    isAgent: user?.role === 'agent',
+    // Lead assignment is a manager/admin capability.
+    canAssign: user?.role === 'manager' || user?.role === 'admin',
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

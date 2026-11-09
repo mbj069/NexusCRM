@@ -10,10 +10,10 @@ const NAV = [
   { to: '/contacts', label: 'Contacts', icon: '👥', roles: ['admin', 'manager', 'agent'] },
   { to: '/inventory', label: 'Inventory', icon: '🏘️', roles: ['admin', 'manager', 'agent'] },
   { to: '/deals', label: 'Deals', icon: '🤝', roles: ['admin', 'manager', 'agent'] },
-  { to: '/payments', label: 'Payments', icon: '💳', roles: ['admin', 'manager', 'agent'] },
+  { to: '/payments', label: 'Payments', icon: '💳', roles: ['admin', 'manager'] },
   { to: '/commissions', label: 'Commissions', icon: '💰', roles: ['admin', 'manager', 'agent'] },
   { to: '/followups', label: 'Follow-ups', icon: '⏰', roles: ['admin', 'manager', 'agent'] },
-  { to: '/settings', label: 'Settings', icon: '⚙️', roles: ['admin', 'manager'] },
+  { to: '/settings', label: 'Settings', icon: '⚙️', roles: ['admin'] },
 ];
 
 function NotificationsBell() {
@@ -120,7 +120,7 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="sidebar-foot">NexusCRM v1</div>
+        <div className="sidebar-foot">NexusCRM v1.1</div>
       </aside>
 
       <div className="main">

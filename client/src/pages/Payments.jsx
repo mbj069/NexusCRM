@@ -125,7 +125,7 @@ export function Payments() {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>Plan</th><th>Contact</th><th>Deal</th><th className="num">Total</th><th className="num">Down payment</th><th className="num">Installments</th><th></th></tr>
+                <tr><th>Plan</th><th>Contact</th><th>Deal</th><th className="num">Total</th><th className="num">Token</th><th className="num">Bayana</th><th className="num">Installments</th><th className="num">Final</th><th></th></tr>
               </thead>
               <tbody>
                 {plans.map((p) => (
@@ -134,8 +134,10 @@ export function Payments() {
                     <td>{contactNames[p.contactId] || p.contact?.name || '—'}</td>
                     <td>{p.dealId ? <Link to={`/deals/${p.dealId}`}>#{String(p.dealId).slice(0, 8)}</Link> : '—'}</td>
                     <td className="num">{pkr(p.totalAmount)}</td>
-                    <td className="num">{pkr(p.downPayment)}</td>
+                    <td className="num">{pkr(p.tokenAmount)}</td>
+                    <td className="num">{pkr(p.bayanaAmount)}</td>
                     <td className="num">{p.numInstallments ? `${p.numInstallments} × ${pkr(p.installmentAmount)}` : '—'}</td>
+                    <td className="num">{pkr(p.finalAmount)}</td>
                     <td><Link to={`/payments/plans/${p.id}`} className="btn btn-ghost btn-sm">Open →</Link></td>
                   </tr>
                 ))}
@@ -252,10 +254,16 @@ export function PlanDetail() {
                 {schedule.map((r, i) => {
                   const st = rowStatus(r);
                   const isOverdue = st === 'overdue';
+                  // Installments are numbered among installment rows (seq counts
+                  // every stage, so it is not the installment number).
+                  const instIdx = r.kind === 'installment'
+                    ? schedule.filter((x, j) => x.kind === 'installment' && j <= i).length : 0;
+                  const stageLabel = r.kind === 'installment' ? `Installment #${instIdx}`
+                    : { token: 'Token money', bayana: 'Bayana', final: 'Final payment' }[r.kind] || prettyLabel(r.kind);
                   return (
                     <tr key={r.id || i} className={isOverdue ? 'overdue-row' : ''}>
-                      <td>{r.seq ?? i}</td>
-                      <td><Badge status={r.kind} /></td>
+                      <td>{(r.seq ?? i) + 1}</td>
+                      <td><Badge status={r.kind} /> <span style={{ marginLeft: 4 }}>{stageLabel}</span></td>
                       <td>{fmtDate(r.dueDate || r.due_date)}</td>
                       <td className="num">{pkr(r.amount)}</td>
                       <td><Badge status={st} /></td>
@@ -390,10 +398,14 @@ export function LedgerView() {
                     <tbody>
                       {sched.map((r, j) => {
                         const st = String(r.status || 'pending').toLowerCase();
+                        const instIdx = r.kind === 'installment'
+                          ? sched.filter((x, k) => x.kind === 'installment' && k <= j).length : 0;
+                        const stageLabel = r.kind === 'installment' ? `Installment #${instIdx}`
+                          : { token: 'Token money', bayana: 'Bayana', final: 'Final payment' }[r.kind] || prettyLabel(r.kind);
                         return (
                           <tr key={r.id || j} className={st === 'overdue' ? 'overdue-row' : ''}>
-                            <td>{r.seq ?? j}</td>
-                            <td><Badge status={r.kind} /></td>
+                            <td>{(r.seq ?? j) + 1}</td>
+                            <td><Badge status={r.kind} /> <span style={{ marginLeft: 4 }}>{stageLabel}</span></td>
                             <td>{fmtDate(r.dueDate || r.due_date)}</td>
                             <td className="num">{pkr(r.amount)}</td>
                             <td><Badge status={st} /></td>

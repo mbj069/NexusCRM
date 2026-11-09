@@ -83,16 +83,22 @@ export function Deals() {
 
 /* ================= Deal detail ================= */
 
+// Payment hierarchy: Token → Bayana → Installments (optional) → Final.
+// Final payment is auto-computed as the remainder and shown before saving.
 function PlanGenerator({ deal, lead, onCreated }) {
   const [contacts, setContacts] = useState([]);
   const [contactQ, setContactQ] = useState('');
   const [contactId, setContactId] = useState('');
-  const [form, setForm] = useState({ downPayment: '', numInstallments: '12', installmentAmount: '', possessionAmount: '', startDate: '' });
+  const [form, setForm] = useState({
+    tokenAmount: '', bayanaAmount: '', hasInstallments: true,
+    numInstallments: '12', installmentAmount: '', startDate: '',
+  });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm((s) => ({ ...s, [k]: e.target.value }));
 
   useEffect(() => {
+    if (deal?.bayanaAmount) setForm((s) => ({ ...s, bayanaAmount: String(deal.bayanaAmount) }));
     const leadContactId = lead?.contactId || lead?.contact_id || lead?.contact?.id;
     if (leadContactId) {
       setContactId(String(leadContactId));
@@ -104,7 +110,7 @@ function PlanGenerator({ deal, lead, onCreated }) {
         } catch { /* ignore */ }
       })();
     }
-  }, [lead]);
+  }, [lead, deal?.bayanaAmount]);
 
   const searchContacts = async (value) => {
     setContactQ(value);
@@ -114,22 +120,30 @@ function PlanGenerator({ deal, lead, onCreated }) {
     } catch { /* ignore */ }
   };
 
+  const token = Number(form.tokenAmount) || 0;
+  const bayana = Number(form.bayanaAmount) || 0;
+  const n = form.hasInstallments ? (Math.floor(Number(form.numInstallments)) || 0) : 0;
+  const inst = form.hasInstallments ? (Number(form.installmentAmount) || 0) : 0;
+  const finalAmount = (deal?.dealValue || 0) - token - bayana - n * inst;
+
   const submit = async (e) => {
     e.preventDefault();
     setError('');
     if (!contactId) { setError('Pick the buyer contact for this plan.'); return; }
-    if (!form.numInstallments || !form.startDate) { setError('Number of installments and start date are required.'); return; }
+    if (!form.startDate) { setError('Start date is required.'); return; }
+    if (finalAmount < 0) { setError('Token + bayana + installments exceed the deal value — lower an amount.'); return; }
     setBusy(true);
     try {
       const payload = {
         dealId: deal.id,
         contactId,
-        numInstallments: Number(form.numInstallments),
+        tokenAmount: token,
+        bayanaAmount: bayana,
+        numInstallments: n,
+        installmentAmount: inst,
+        finalAmount,
         startDate: form.startDate,
       };
-      ['downPayment', 'installmentAmount', 'possessionAmount'].forEach((k) => {
-        if (form[k] !== '') payload[k] = Number(form[k]);
-      });
       const plan = await post('/api/plans', payload);
       onCreated(plan.plan || plan);
     } catch (err) {
@@ -158,16 +172,33 @@ function PlanGenerator({ deal, lead, onCreated }) {
         <div className="hint">The person paying the installments.</div>
       </Field>
       <div className="form-row">
-        <Field label="Down payment (PKR)"><input className="input" type="number" min="0" value={form.downPayment} onChange={set('downPayment')} /></Field>
-        <Field label="Possession amount (PKR)"><input className="input" type="number" min="0" value={form.possessionAmount} onChange={set('possessionAmount')} /></Field>
+        <Field label="1 · Token money (PKR)"><input className="input" type="number" min="0" value={form.tokenAmount} onChange={set('tokenAmount')} /></Field>
+        <Field label="2 · Bayana (PKR)"><input className="input" type="number" min="0" value={form.bayanaAmount} onChange={set('bayanaAmount')} /></Field>
       </div>
-      <div className="form-row">
-        <Field label="No. of installments *"><input className="input" type="number" min="1" value={form.numInstallments} onChange={set('numInstallments')} required /></Field>
-        <Field label="Installment amount (PKR)"><input className="input" type="number" min="0" value={form.installmentAmount} onChange={set('installmentAmount')} /></Field>
-      </div>
+      <Field label="3 · Installments">
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 500 }}>
+          <input
+            type="checkbox" checked={form.hasInstallments}
+            onChange={(e) => setForm((s) => ({ ...s, hasInstallments: e.target.checked }))}
+          />
+          Pay in installments (optional)
+        </label>
+      </Field>
+      {form.hasInstallments && (
+        <div className="form-row">
+          <Field label="No. of installments *"><input className="input" type="number" min="0" value={form.numInstallments} onChange={set('numInstallments')} required /></Field>
+          <Field label="Installment amount (PKR)"><input className="input" type="number" min="0" value={form.installmentAmount} onChange={set('installmentAmount')} /></Field>
+        </div>
+      )}
       <Field label="Start date *"><input className="input" type="date" value={form.startDate} onChange={set('startDate')} required /></Field>
+      <div className="kv" style={{ marginBottom: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderTop: '1px solid var(--border)' }}>
+          <strong>4 · Final payment (auto-computed)</strong>
+          <strong style={{ color: finalAmount < 0 ? 'var(--red-600)' : 'inherit' }}>{pkr(finalAmount)}</strong>
+        </div>
+      </div>
       <div className="hint" style={{ marginBottom: 8 }}>
-        Down payment + (installments × amount) + possession must equal the deal value{deal.dealValue ? ` (${pkr(deal.dealValue)})` : ''}.
+        Token + bayana + (installments × amount) + final must equal the deal value{deal.dealValue ? ` (${pkr(deal.dealValue)})` : ''}.
       </div>
       <div className="modal-foot">
         <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Generating…' : 'Generate plan'}</button>
@@ -318,15 +349,17 @@ export function DealDetail() {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>Plan</th><th className="num">Total</th><th className="num">Down payment</th><th className="num">Installments</th><th>Start</th><th></th></tr>
+                <tr><th>Plan</th><th className="num">Total</th><th className="num">Token</th><th className="num">Bayana</th><th className="num">Installments</th><th className="num">Final</th><th>Start</th><th></th></tr>
               </thead>
               <tbody>
                 {plans.map((p) => (
                   <tr key={p.id}>
                     <td><strong>Plan #{String(p.id).slice(0, 8)}</strong></td>
                     <td className="num">{pkr(p.totalAmount)}</td>
-                    <td className="num">{pkr(p.downPayment)}</td>
+                    <td className="num">{pkr(p.tokenAmount)}</td>
+                    <td className="num">{pkr(p.bayanaAmount)}</td>
                     <td className="num">{p.numInstallments ? `${p.numInstallments} × ${pkr(p.installmentAmount)}` : '—'}</td>
+                    <td className="num">{pkr(p.finalAmount)}</td>
                     <td>{fmtDate(p.startDate)}</td>
                     <td><Link to={`/payments/plans/${p.id}`} className="btn btn-ghost btn-sm">Open →</Link></td>
                   </tr>

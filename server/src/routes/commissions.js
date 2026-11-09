@@ -1,4 +1,5 @@
-// Commissions: agents see only their own rows; paying out is manager/admin.
+// Commissions: agents see only their own rows; paying out and manual
+// overrides are admin-only.
 
 import { Router } from 'express';
 import { db, camel } from '../db.js';
@@ -40,7 +41,30 @@ router.get('/', ah(async (req, res) => {
   res.json({ commissions: rows, summary });
 }));
 
-// POST /api/commissions/:id/pay { paidAt? } — manager/admin only
+// PUT /api/commissions/:id — manual override (admin only): set the amount
+// and/or status independent of the auto percent/fixed calculation at deal
+// creation. Sets manual=1 so later deal-term edits do not overwrite it.
+// Every manual change is audit-logged with old → new values.
+router.put('/:id', ah(async (req, res) => {
+  if (!can(req.user.role, 'assign_commissions')) {
+    throw httpError(403, 'Only an admin can set commissions manually.');
+  }
+  const row = await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id);
+  if (!row) throw httpError(404, 'Commission not found.');
+  const { amount, status } = req.body || {};
+  if (amount !== undefined && !(Number(amount) >= 0)) throw httpError(400, 'Amount must be zero or more.');
+  if (status !== undefined && !['pending', 'paid'].includes(status)) throw httpError(400, 'Status must be pending or paid.');
+  const nextAmount = amount !== undefined ? Number(amount) : row.amount;
+  const nextStatus = status ?? row.status;
+  const nextPaidAt = nextStatus === 'paid' ? (row.paid_at || new Date().toISOString()) : null;
+  await db.prepare(`UPDATE commissions SET amount = ?, status = ?, paid_at = ?, manual = 1 WHERE id = ?`)
+    .run(nextAmount, nextStatus, nextPaidAt, req.params.id);
+  auditReq(req, 'COMMISSION_MANUAL', { entityType: 'commission', entityId: req.params.id,
+    details: `Manual commission override (deal ${row.deal_id}, agent ${row.agent_id}): ${row.amount} ${row.status} → ${nextAmount} ${nextStatus}.` });
+  res.json(camel(await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id)));
+}));
+
+// POST /api/commissions/:id/pay { paidAt? } — admin only
 router.post('/:id/pay', ah(async (req, res) => {
   if (!can(req.user.role, 'pay_commissions')) {
     throw httpError(403, 'Insufficient permissions.');

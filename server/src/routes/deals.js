@@ -14,6 +14,15 @@ router.use(requireAuth, requirePermission('crm'));
 const VALID_STAGES = ['proposed', 'token_paid', 'in_progress', 'closed_won', 'closed_lost', 'cancelled'];
 const VALID_COMMISSION_TYPES = ['percent', 'fixed'];
 
+const isAgent = (req) => req.user.role === 'agent';
+
+// Agents may only touch their own deals (agent_id = self).
+function assertDealVisible(req, row) {
+  if (isAgent(req) && row.agent_id !== req.user.sub) {
+    throw httpError(403, 'Deal not assigned to you.');
+  }
+}
+
 function commissionAmount(dealValue, type, value) {
   return type === 'percent' ? (dealValue * value) / 100 : value;
 }
@@ -27,7 +36,12 @@ router.get('/', ah(async (req, res) => {
     if (!VALID_STAGES.includes(stage)) throw httpError(400, `Invalid stage. Use one of: ${VALID_STAGES.join(', ')}.`);
     where.push('d.stage = ?'); params.push(stage);
   }
-  if (agentId) { where.push('d.agent_id = ?'); params.push(agentId); }
+  if (isAgent(req)) {
+    // Agent scoping is server-side and not overridable by query params.
+    where.push('d.agent_id = ?'); params.push(req.user.sub);
+  } else if (agentId) {
+    where.push('d.agent_id = ?'); params.push(agentId);
+  }
   const sql = `SELECT d.*, l.name AS lead_name, p.code AS property_code, p.title AS property_title,
       u.name AS agent_name FROM deals d
     LEFT JOIN leads l ON l.id = d.lead_id
@@ -48,10 +62,12 @@ router.post('/', ah(async (req, res) => {
     throw httpError(400, `commissionType must be one of: ${VALID_COMMISSION_TYPES.join(', ')}.`);
   }
   if (leadId) {
-    const lead = await db.prepare('SELECT id FROM leads WHERE id = ?').get(leadId);
+    const lead = await db.prepare('SELECT id, assigned_to FROM leads WHERE id = ?').get(leadId);
     if (!lead) throw httpError(400, 'Lead not found.');
+    if (isAgent(req) && lead.assigned_to !== req.user.sub) throw httpError(403, 'Lead not assigned to you.');
   }
-  const agent = agentId || req.user.sub;
+  // Agents create deals for themselves; manager/admin may pick the agent.
+  const agent = isAgent(req) ? req.user.sub : (agentId || req.user.sub);
   const agentRow = await db.prepare('SELECT id FROM users WHERE id = ?').get(agent);
   if (!agentRow) throw httpError(400, 'Agent not found.');
 
@@ -90,6 +106,7 @@ router.get('/:id', ah(async (req, res) => {
     LEFT JOIN leads l ON l.id = d.lead_id LEFT JOIN users u ON u.id = d.agent_id
     WHERE d.id = ?`).get(req.params.id);
   if (!row) throw httpError(404, 'Deal not found.');
+  assertDealVisible(req, row);
   const deal = camel(row);
   deal.lead = row.lead_id ? camel(await db.prepare('SELECT * FROM leads WHERE id = ?').get(row.lead_id)) : null;
   deal.property = row.property_id ? camel(await db.prepare('SELECT * FROM properties WHERE id = ?').get(row.property_id)) : null;
@@ -113,10 +130,12 @@ router.get('/:id', ah(async (req, res) => {
 router.put('/:id', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Deal not found.');
+  assertDealVisible(req, row);
   if (['closed_won', 'closed_lost', 'cancelled'].includes(row.stage)) {
     throw httpError(400, `Deal is ${row.stage} and can no longer be edited.`);
   }
   const { leadId, dealValue, bayanaAmount, commissionType, commissionValue, notes, agentId } = req.body || {};
+  if (isAgent(req) && agentId && agentId !== req.user.sub) throw httpError(403, 'Agents cannot reassign deals.');
   if (commissionType !== undefined && !VALID_COMMISSION_TYPES.includes(commissionType)) {
     throw httpError(400, `commissionType must be one of: ${VALID_COMMISSION_TYPES.join(', ')}.`);
   }
@@ -129,10 +148,12 @@ router.put('/:id', ah(async (req, res) => {
       bayanaAmount !== undefined ? Number(bayanaAmount) || 0 : null,
       commissionType ?? null, commissionValue !== undefined ? Number(commissionValue) || 0 : null,
       notes !== undefined ? String(notes) : null, agentId ?? null, req.params.id);
-  // Keep the pending commission in sync with edited terms.
+  // Keep the pending commission in sync with edited terms — except a
+  // manually overridden commission (manual=1), which the admin set
+  // deliberately and which term edits must not overwrite.
   const updated = await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
   const newComm = commissionAmount(updated.deal_value, updated.commission_type, updated.commission_value);
-  await db.prepare(`UPDATE commissions SET amount = ?, agent_id = ? WHERE deal_id = ? AND status = 'pending'`)
+  await db.prepare(`UPDATE commissions SET amount = ?, agent_id = ? WHERE deal_id = ? AND status = 'pending' AND manual = 0`)
     .run(newComm, updated.agent_id, req.params.id);
   auditReq(req, 'DEAL_UPDATE', { entityType: 'deal', entityId: req.params.id, details: `Updated deal terms.` });
   res.json(camel(await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id)));
@@ -144,6 +165,7 @@ router.put('/:id', ah(async (req, res) => {
 router.post('/:id/stage', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Deal not found.');
+  assertDealVisible(req, row);
   const { stage } = req.body || {};
   if (!VALID_STAGES.includes(stage)) throw httpError(400, `Stage must be one of: ${VALID_STAGES.join(', ')}.`);
   if (stage === row.stage) return res.json(camel(row));
