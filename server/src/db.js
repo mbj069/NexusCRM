@@ -444,9 +444,14 @@ async function migrateV11() {
   // when the old CHECK ('residential' / 'commercial') is still present.
   const propSql = await tableSql('properties');
   if (propSql.includes("'residential'")) {
-    await client.execute('PRAGMA foreign_keys = OFF');
-    try {
-      await db.exec(`
+    // PRAGMA foreign_keys must ride INSIDE the same executeMultiple batch:
+    // over Turso HTTP each client.execute() is a separate session, so a
+    // PRAGMA issued on its own is lost before the rebuild runs, and the
+    // DROP then fails on FK constraints. The batch also drops any _new
+    // leftover from a crashed earlier run, so a retry self-heals.
+    await db.exec(`
+        PRAGMA foreign_keys = OFF;
+        DROP TABLE IF EXISTS properties_new;
         CREATE TABLE properties_new (
           id TEXT PRIMARY KEY,
           code TEXT UNIQUE NOT NULL,
@@ -474,10 +479,8 @@ async function migrateV11() {
           FROM properties;
         DROP TABLE properties;
         ALTER TABLE properties_new RENAME TO properties;
+        PRAGMA foreign_keys = ON;
       `);
-    } finally {
-      await client.execute('PRAGMA foreign_keys = ON');
-    }
     await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_status ON properties(status)');
     await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_code ON properties(code)');
   }
@@ -512,9 +515,14 @@ async function migrateV11() {
   // --- Payment schedule: stage kinds ---------------------------------------
   const schedSql = await tableSql('payment_schedule');
   if (schedSql.includes("'down_payment'")) {
-    await client.execute('PRAGMA foreign_keys = OFF');
-    try {
-      await db.exec(`
+    // Same in-batch PRAGMA rule as the properties rebuild above: the
+    // separate PRAGMA call never reached the rebuild over Turso HTTP, so
+    // DROP TABLE payment_schedule failed on payments.schedule_id FKs and
+    // took the whole server down on every cold start. In-batch PRAGMA +
+    // DROP IF EXISTS _new makes the step self-healing.
+    await db.exec(`
+        PRAGMA foreign_keys = OFF;
+        DROP TABLE IF EXISTS payment_schedule_new;
         CREATE TABLE payment_schedule_new (
           id TEXT PRIMARY KEY,
           plan_id TEXT NOT NULL REFERENCES payment_plans(id) ON DELETE CASCADE,
@@ -532,10 +540,8 @@ async function migrateV11() {
           FROM payment_schedule;
         DROP TABLE payment_schedule;
         ALTER TABLE payment_schedule_new RENAME TO payment_schedule;
+        PRAGMA foreign_keys = ON;
       `);
-    } finally {
-      await client.execute('PRAGMA foreign_keys = ON');
-    }
     await db.exec('CREATE INDEX IF NOT EXISTS idx_schedule_plan ON payment_schedule(plan_id)');
     await db.exec('CREATE INDEX IF NOT EXISTS idx_schedule_due ON payment_schedule(due_date, status)');
   }
