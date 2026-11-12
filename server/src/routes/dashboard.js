@@ -3,12 +3,15 @@
 //
 //   admin   — full totals: revenue collected/expected, all-leads funnel,
 //             full inventory counts, all-agents performance (with money),
-//             commission totals, overdue totals, recent activity.
+//             commission totals (plus explicit totalCommission /
+//             pendingCommission), overdue totals, recent activity.
 //   manager — team view: leads/deals by stage, per-agent performance
-//             (counts only), follow-up load, overdue list. NO grand money
+//             (counts only, incl. commission pending/paid COUNTS),
+//             follow-up load, overdue list, commissionCounts. NO grand money
 //             totals (no revenue, no commission totals, no agent revenue).
 //   agent   — only their own numbers: assigned leads by stage, own deals,
-//             own commissions, own follow-ups, own overdue items.
+//             own commissions (plus explicit myTotalCommission /
+//             myPendingCommission), own follow-ups, own overdue items.
 //             No totals, no other agents.
 
 import { Router } from 'express';
@@ -37,8 +40,18 @@ router.get('/', ah(async (req, res) => {
     const commPending = (await db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM commissions WHERE status = 'pending'").get()).s;
     const commPaid = (await db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM commissions WHERE status = 'paid'").get()).s;
     out.commissionTotals = { pending: commPending, paid: commPaid };
+    out.totalCommission = commPending + commPaid;
+    out.pendingCommission = commPending;
     out.recentActivity = (await db.prepare(`SELECT id, timestamp, actor_name, role, action, entity_type, entity_id, details
       FROM audit_log ORDER BY id DESC LIMIT 15`).all()).map(camel);
+  }
+
+  // --- Manager-only: commission COUNTS (no money) ---------------------------
+  // Managers see how many commissions are pending/paid, never the amounts.
+  if (role === 'manager') {
+    const countPending = (await db.prepare("SELECT COUNT(*) AS n FROM commissions WHERE status = 'pending'").get()).n;
+    const countPaid = (await db.prepare("SELECT COUNT(*) AS n FROM commissions WHERE status = 'paid'").get()).n;
+    out.commissionCounts = { pending: countPending, paid: countPaid };
   }
 
   // --- Leads by stage (agent: assigned only) --------------------------------
@@ -112,6 +125,11 @@ router.get('/', ah(async (req, res) => {
         row.revenue = closed.rev;
         row.commissionEarned = comm;
       }
+      if (role === 'manager') {
+        // Counts only — no money reaches the manager.
+        row.commissionPendingCount = (await db.prepare("SELECT COUNT(*) AS n FROM commissions WHERE agent_id = ? AND status = 'pending'").get(a.id)).n;
+        row.commissionPaidCount = (await db.prepare("SELECT COUNT(*) AS n FROM commissions WHERE agent_id = ? AND status = 'paid'").get(a.id)).n;
+      }
       agentPerformance.push(row);
     }
     out.agentPerformance = agentPerformance;
@@ -122,6 +140,8 @@ router.get('/', ah(async (req, res) => {
     const myPending = (await db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM commissions WHERE agent_id = ? AND status = 'pending'").get(me)).s;
     const myPaid = (await db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM commissions WHERE agent_id = ? AND status = 'paid'").get(me)).s;
     out.myCommissions = { pending: myPending, paid: myPaid };
+    out.myTotalCommission = myPending + myPaid;
+    out.myPendingCommission = myPending;
     const myDeals = (await db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(deal_value),0) AS v FROM deals
       WHERE agent_id = ? AND stage IN ('proposed','token_paid','in_progress')`).get(me));
     out.myDeals = { open: myDeals.n, openValue: myDeals.v };

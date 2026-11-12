@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { get, post, put, del, qs, asArray } from '../api';
 import {
   PageHeader, Card, Badge, Modal, EmptyState, Spinner, Alert, Field,
@@ -66,6 +66,7 @@ function ContactForm({ initial, onSaved, onCancel }) {
 
 export function Contacts() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [contacts, setContacts] = useState([]);
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
@@ -84,7 +85,14 @@ export function Contacts() {
     }
   };
 
-  useEffect(() => { load(''); }, []);
+  useEffect(() => {
+    load('');
+    // Quick Add from the dashboard navigates here with { openNew: true }.
+    if (location.state?.openNew) {
+      setShowNew(true);
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, []);
 
   const remove = async (c) => {
     if (!window.confirm(`Delete contact "${c.name}"? This cannot be undone.`)) return;

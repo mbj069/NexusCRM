@@ -16,7 +16,7 @@ router.use(requireAuth, requirePermission('crm'));
 
 const VALID_SOURCES = ['website', 'WhatsApp', 'social', 'manual', 'referral'];
 const VALID_STAGES = ['new', 'contacted', 'viewing', 'negotiating', 'won', 'lost'];
-const VALID_INTENTS = ['buy', 'sell'];
+const VALID_INTENTS = ['buy', 'sell', 'rent'];
 
 const isAgent = (req) => req.user.role === 'agent';
 

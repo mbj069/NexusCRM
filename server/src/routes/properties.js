@@ -16,14 +16,14 @@ const router = Router();
 router.use(requireAuth, requirePermission('crm'));
 
 const VALID_TYPES = ['plot', 'house', 'commercial_land', 'agriculture_land', 'shop', 'commercial_building'];
-const VALID_STATUSES = ['Available', 'Booked', 'Sold', 'Blocked'];
+const VALID_STATUSES = ['Available', 'Booked', 'Sold', 'Rented', 'Blocked'];
 const VALID_UNITS = ['marla', 'kanal', 'sqft'];
-const VALID_LISTING_TYPES = ['sale'];
+const VALID_LISTING_TYPES = ['sale', 'rent'];
 
 function filters(query) {
   const where = [];
   const params = [];
-  const { status, type, q } = query;
+  const { status, type, q, listing } = query;
   // Columns are qualified (p.) — the list query joins contacts, which also
   // has a `type` column.
   if (status) {
@@ -33,6 +33,10 @@ function filters(query) {
   if (type) {
     if (!VALID_TYPES.includes(type)) throw httpError(400, `Invalid type. Use one of: ${VALID_TYPES.join(', ')}.`);
     where.push('p.type = ?'); params.push(type);
+  }
+  if (listing) {
+    if (!VALID_LISTING_TYPES.includes(listing)) throw httpError(400, `Invalid listing. Use one of: ${VALID_LISTING_TYPES.join(', ')}.`);
+    where.push('p.listing_type = ?'); params.push(listing);
   }
   if (q?.trim()) {
     const like = `%${q.trim()}%`;
@@ -53,7 +57,7 @@ async function withSeller(row) {
   return prop;
 }
 
-// GET /api/properties?status=&type=&q=
+// GET /api/properties?status=&type=&q=&listing=
 router.get('/', ah(async (req, res) => {
   const { where, params } = filters(req.query);
   const sql = `SELECT p.*, c.name AS seller_name FROM properties p
@@ -62,11 +66,15 @@ router.get('/', ah(async (req, res) => {
   res.json((await db.prepare(sql).all(...params)).map(camel));
 }));
 
-// GET /api/properties/search?type=&location=&minPrice=&maxPrice=&minArea=&status=Available&q=
+// GET /api/properties/search?type=&location=&minPrice=&maxPrice=&minArea=&status=Available&q=&listing=
+// minPrice/maxPrice and the ordering use the EFFECTIVE price: rent per month
+// for rental listings, sale price otherwise — so a rent filter by monthly
+// budget works.
 router.get('/search', ah(async (req, res) => {
-  const { type, location, minPrice, maxPrice, minArea, status = 'Available', q } = req.query;
+  const { type, location, minPrice, maxPrice, minArea, status = 'Available', q, listing } = req.query;
   const where = [];
   const params = [];
+  const effPrice = "CASE WHEN listing_type = 'rent' THEN rent_per_month ELSE price END";
   if (status) {
     if (!VALID_STATUSES.includes(status)) throw httpError(400, 'Invalid status.');
     where.push('status = ?'); params.push(status);
@@ -75,30 +83,43 @@ router.get('/search', ah(async (req, res) => {
     if (!VALID_TYPES.includes(type)) throw httpError(400, 'Invalid type.');
     where.push('type = ?'); params.push(type);
   }
+  if (listing) {
+    if (!VALID_LISTING_TYPES.includes(listing)) throw httpError(400, 'Invalid listing.');
+    where.push('listing_type = ?'); params.push(listing);
+  }
   if (location?.trim()) { where.push('location LIKE ?'); params.push(`%${location.trim()}%`); }
-  if (minPrice !== undefined && minPrice !== '') { where.push('price >= ?'); params.push(Number(minPrice)); }
-  if (maxPrice !== undefined && maxPrice !== '') { where.push('price <= ?'); params.push(Number(maxPrice)); }
+  if (minPrice !== undefined && minPrice !== '') { where.push(`${effPrice} >= ?`); params.push(Number(minPrice)); }
+  if (maxPrice !== undefined && maxPrice !== '') { where.push(`${effPrice} <= ?`); params.push(Number(maxPrice)); }
   if (minArea !== undefined && minArea !== '') { where.push('area_value >= ?'); params.push(Number(minArea)); }
   if (q?.trim()) {
     const like = `%${q.trim()}%`;
     where.push('(code LIKE ? OR title LIKE ? OR location LIKE ? OR description LIKE ?)');
     params.push(like, like, like, like);
   }
-  const sql = `SELECT * FROM properties ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY price`;
+  const sql = `SELECT * FROM properties ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${effPrice}`;
   res.json((await db.prepare(sql).all(...params)).map(camel));
 }));
 
-// POST /api/properties — a property listed "For Sale" goes straight into
-// inventory as Available.
+// POST /api/properties — a property listed "For Sale" or "For Rent" goes
+// straight into inventory as Available. Rental listings carry rent_per_month
+// (price is stored as 0); sale listings carry price (rent_per_month NULL).
 router.post('/', ah(async (req, res) => {
   const { code, type, title, location = '', areaValue = 0, areaUnit = 'marla', price = 0,
-    status = 'Available', description = '', ownerId, listingType = 'sale', sellerContactId = null } = req.body || {};
+    rentPerMonth, status = 'Available', description = '', ownerId, listingType = 'sale', sellerContactId = null } = req.body || {};
   if (!code?.trim()) throw httpError(400, 'Property code is required (e.g. PLT-001).');
   if (!title?.trim()) throw httpError(400, 'Title is required.');
   if (!VALID_TYPES.includes(type)) throw httpError(400, `Type must be one of: ${VALID_TYPES.join(', ')}.`);
   if (!VALID_UNITS.includes(areaUnit)) throw httpError(400, `Area unit must be one of: ${VALID_UNITS.join(', ')}.`);
   if (!VALID_LISTING_TYPES.includes(listingType)) throw httpError(400, `Listing type must be one of: ${VALID_LISTING_TYPES.join(', ')}.`);
   if (status !== 'Available') throw httpError(400, 'New properties must start as Available.');
+  // Rental listings need a positive monthly rent; sale listings ignore it.
+  let rent = null;
+  let priceVal = Number(price) || 0;
+  if (listingType === 'rent') {
+    if (!(Number(rentPerMonth) > 0)) throw httpError(400, 'Rent per month is required and must be greater than 0 for rental listings.');
+    rent = Number(rentPerMonth);
+    priceVal = 0;
+  }
   if (sellerContactId) {
     const c = await db.prepare('SELECT id FROM contacts WHERE id = ?').get(sellerContactId);
     if (!c) throw httpError(400, 'Seller contact not found.');
@@ -106,11 +127,11 @@ router.post('/', ah(async (req, res) => {
   const exists = await db.prepare('SELECT id FROM properties WHERE code = ?').get(code.trim());
   if (exists) throw httpError(409, `Property code ${code.trim()} already exists.`);
   const id = uid();
-  await db.prepare(`INSERT INTO properties (id, code, type, title, location, area_value, area_unit, price, status, description, owner_id, listing_type, seller_contact_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Available', ?, ?, ?, ?)`)
+  await db.prepare(`INSERT INTO properties (id, code, type, title, location, area_value, area_unit, price, rent_per_month, status, description, owner_id, listing_type, seller_contact_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Available', ?, ?, ?, ?)`)
     .run(id, code.trim(), type, title.trim(), String(location).trim(), Number(areaValue) || 0,
-      areaUnit, Number(price) || 0, String(description), ownerId || req.user.sub, listingType, sellerContactId);
-  auditReq(req, 'PROPERTY_CREATE', { entityType: 'property', entityId: id, details: `Created property ${code.trim()} — ${title.trim()} (for sale, Available).` });
+      areaUnit, priceVal, rent, String(description), ownerId || req.user.sub, listingType, sellerContactId);
+  auditReq(req, 'PROPERTY_CREATE', { entityType: 'property', entityId: id, details: `Created property ${code.trim()} — ${title.trim()} (for ${listingType === 'rent' ? 'rent' : 'sale'}, Available).` });
   res.status(201).json(await withSeller(await db.prepare('SELECT * FROM properties WHERE id = ?').get(id)));
 }));
 
@@ -125,7 +146,7 @@ router.get('/:id', ah(async (req, res) => {
 router.put('/:id', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM properties WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Property not found.');
-  const { code, type, title, location, areaValue, areaUnit, price, description, ownerId, listingType, sellerContactId } = req.body || {};
+  const { code, type, title, location, areaValue, areaUnit, price, rentPerMonth, description, ownerId, listingType, sellerContactId } = req.body || {};
   if (code !== undefined && String(code).trim() !== row.code) {
     const dup = await db.prepare('SELECT id FROM properties WHERE code = ? AND id != ?').get(String(code).trim(), req.params.id);
     if (dup) throw httpError(409, `Property code ${String(code).trim()} already exists.`);
@@ -137,10 +158,22 @@ router.put('/:id', ah(async (req, res) => {
     const c = await db.prepare('SELECT id FROM contacts WHERE id = ?').get(sellerContactId);
     if (!c) throw httpError(400, 'Seller contact not found.');
   }
+  // Rental rules on edit: the effective listing type decides the money
+  // fields. Rent needs a positive monthly rent (price forced to 0);
+  // switching to sale clears rent_per_month to NULL.
+  const effListing = listingType ?? row.listing_type;
+  let nextRent = null;
+  let nextPrice = price !== undefined ? Number(price) || 0 : row.price;
+  if (effListing === 'rent') {
+    const r = rentPerMonth !== undefined ? Number(rentPerMonth) : row.rent_per_month;
+    if (!(r > 0)) throw httpError(400, 'Rent per month is required and must be greater than 0 for rental listings.');
+    nextRent = r;
+    nextPrice = 0;
+  }
   await db.prepare(`UPDATE properties SET code = COALESCE(?, code), type = COALESCE(?, type),
     title = COALESCE(?, title), location = COALESCE(?, location),
     area_value = COALESCE(?, area_value), area_unit = COALESCE(?, area_unit),
-    price = COALESCE(?, price), description = COALESCE(?, description),
+    price = ?, rent_per_month = ?, description = COALESCE(?, description),
     owner_id = COALESCE(?, owner_id), listing_type = COALESCE(?, listing_type),
     seller_contact_id = CASE WHEN ? THEN ? ELSE seller_contact_id END,
     updated_at = datetime('now') WHERE id = ?`)
@@ -149,7 +182,7 @@ router.put('/:id', ah(async (req, res) => {
       title !== undefined ? String(title).trim() : null,
       location !== undefined ? String(location).trim() : null,
       areaValue !== undefined ? Number(areaValue) || 0 : null, areaUnit ?? null,
-      price !== undefined ? Number(price) || 0 : null,
+      nextPrice, nextRent,
       description !== undefined ? String(description) : null,
       ownerId ?? null, listingType ?? null,
       sellerContactId !== undefined ? 1 : 0, sellerContactId ?? null,
@@ -176,16 +209,16 @@ router.post('/:id/seller', ah(async (req, res) => {
 }));
 
 // POST /api/properties/:id/status { status }
-// Blocked <-> Available allowed. Sold is terminal: any change away from
-// Sold is rejected. Booked is managed by the deal endpoints.
+// Blocked <-> Available allowed. Sold and Rented are terminal: any change
+// away from them is rejected. Booked is managed by the deal endpoints.
 router.post('/:id/status', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM properties WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Property not found.');
   const { status } = req.body || {};
   if (!['Available', 'Blocked'].includes(status)) {
-    throw httpError(400, 'Status here must be Available or Blocked (use deals for Booked/Sold).');
+    throw httpError(400, 'Status here must be Available or Blocked (use deals for Booked/Sold/Rented).');
   }
-  if (row.status === 'Sold') throw httpError(400, 'Property is Sold and its status cannot be changed.');
+  if (row.status === 'Sold' || row.status === 'Rented') throw httpError(400, `Property is ${row.status} and its status cannot be changed.`);
   if (row.status === 'Booked') {
     throw httpError(400, 'Property is Booked on a deal — change the deal stage to release it.');
   }

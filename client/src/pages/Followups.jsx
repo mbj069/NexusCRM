@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { get, post, put, del, qs, asArray } from '../api';
 import {
   PageHeader, Card, Badge, Modal, EmptyState, Spinner, Alert, Field,
@@ -72,6 +72,8 @@ const entityLink = (f) => {
 };
 
 export default function Followups() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [items, setItems] = useState([]);
   const [showOverdueOnly, setShowOverdueOnly] = useState(false);
   const [showMineOnly, setShowMineOnly] = useState(false);
@@ -94,7 +96,14 @@ export default function Followups() {
     }
   };
 
-  useEffect(() => { load(false, false); }, []);
+  useEffect(() => {
+    load(false, false);
+    // Quick Add from the dashboard navigates here with { openNew: true }.
+    if (location.state?.openNew) {
+      setShowNew(true);
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, []);
 
   const toggleOverdue = () => { const v = !showOverdueOnly; setShowOverdueOnly(v); load(v, showMineOnly); };
   const toggleMine = () => { const v = !showMineOnly; setShowMineOnly(v); load(showOverdueOnly, v); };

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { get, post, put, del, qs, asArray } from '../api';
 import {
   PageHeader, Card, Badge, Modal, EmptyState, Spinner, Alert, Field,
@@ -9,12 +9,12 @@ import DealModal from '../components/DealModal';
 import { DocumentsPanel } from './Contacts';
 
 const PROP_TYPES = ['plot', 'house', 'commercial_land', 'agriculture_land', 'shop', 'commercial_building'];
-const PROP_STATUSES = ['Available', 'Booked', 'Sold', 'Blocked'];
+const PROP_STATUSES = ['Available', 'Booked', 'Sold', 'Rented', 'Blocked'];
 
 function PropertyForm({ initial, onSaved, onCancel }) {
   const [f, setF] = useState({
     code: '', type: 'plot', title: '', location: '', areaValue: '', areaUnit: 'marla',
-    price: '', listingType: 'sale', description: '',
+    price: '', rentPerMonth: '', listingType: 'sale', description: '',
     ...(initial || {}),
   });
   const [error, setError] = useState('');
@@ -40,7 +40,13 @@ function PropertyForm({ initial, onSaved, onCancel }) {
     try {
       const payload = { ...f };
       if (payload.areaValue === '') delete payload.areaValue; else payload.areaValue = Number(payload.areaValue);
-      if (payload.price === '') delete payload.price; else payload.price = Number(payload.price);
+      if (payload.listingType === 'rent') {
+        delete payload.price;
+        if (payload.rentPerMonth === '') delete payload.rentPerMonth; else payload.rentPerMonth = Number(payload.rentPerMonth);
+      } else {
+        delete payload.rentPerMonth;
+        if (payload.price === '') delete payload.price; else payload.price = Number(payload.price);
+      }
       if (sellerId) payload.sellerContactId = sellerId;
       Object.keys(payload).forEach((k) => { if (payload[k] === '') delete payload[k]; });
       if (initial?.id) await put(`/api/properties/${initial.id}`, payload);
@@ -61,6 +67,7 @@ function PropertyForm({ initial, onSaved, onCancel }) {
         <Field label="Listing purpose">
           <select className="select" value={f.listingType || 'sale'} onChange={set('listingType')}>
             <option value="sale">🏷️ For Sale</option>
+            <option value="rent">🏠 For Rent</option>
           </select>
         </Field>
       </div>
@@ -83,7 +90,11 @@ function PropertyForm({ initial, onSaved, onCancel }) {
           </select>
         </Field>
       </div>
-      <Field label="Price (PKR)"><input className="input" type="number" min="0" value={f.price} onChange={set('price')} placeholder="e.g. 8500000" /></Field>
+      {f.listingType === 'rent' ? (
+        <Field label="Rent per month (PKR) *"><input className="input" type="number" min="0" value={f.rentPerMonth} onChange={set('rentPerMonth')} placeholder="e.g. 45000" required /></Field>
+      ) : (
+        <Field label="Price (PKR)"><input className="input" type="number" min="0" value={f.price} onChange={set('price')} placeholder="e.g. 8500000" /></Field>
+      )}
       <Field label="Owner / seller (contact)">
         <input
           className="input" list="seller-list" placeholder="Type to search contacts…"
@@ -102,7 +113,9 @@ function PropertyForm({ initial, onSaved, onCancel }) {
       <Field label="Description"><textarea className="textarea" value={f.description} onChange={set('description')} /></Field>
       {!initial?.id && (
         <div className="hint" style={{ marginBottom: 8 }}>
-          Listed “For Sale” — the property goes straight into inventory as Available.
+          {f.listingType === 'rent'
+            ? 'Listed “For Rent” — the property goes straight into inventory as Available, priced per month.'
+            : 'Listed “For Sale” — the property goes straight into inventory as Available.'}
         </div>
       )}
       <div className="modal-foot">
@@ -114,8 +127,10 @@ function PropertyForm({ initial, onSaved, onCancel }) {
 }
 
 export function Inventory() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [props, setProps] = useState([]);
-  const [filters, setFilters] = useState({ type: '', location: '', minPrice: '', maxPrice: '', status: '', q: '' });
+  const [filters, setFilters] = useState({ type: '', location: '', minPrice: '', maxPrice: '', status: '', q: '', listing: '' });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showNew, setShowNew] = useState(false);
@@ -129,10 +144,10 @@ export function Inventory() {
       try {
         list = await get('/api/properties/search' + qs({
           type: f.type, location: f.location, minPrice: f.minPrice,
-          maxPrice: f.maxPrice, status: f.status, q: f.q,
+          maxPrice: f.maxPrice, status: f.status, q: f.q, listing: f.listing,
         }));
       } catch {
-        list = await get('/api/properties' + qs({ status: f.status, type: f.type, q: f.q }));
+        list = await get('/api/properties' + qs({ status: f.status, type: f.type, q: f.q, listing: f.listing }));
       }
       setProps(asArray(list));
     } catch (e) {
@@ -142,11 +157,18 @@ export function Inventory() {
     }
   };
 
-  useEffect(() => { load({ type: '', location: '', minPrice: '', maxPrice: '', status: '', q: '' }); }, []);
+  useEffect(() => {
+    load({ type: '', location: '', minPrice: '', maxPrice: '', status: '', q: '', listing: '' });
+    // Quick Add from the dashboard navigates here with { openNew: true }.
+    if (location.state?.openNew) {
+      setShowNew(true);
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, []);
 
   const setF = (k) => (e) => setFilters((s) => ({ ...s, [k]: e.target.value }));
   const clear = () => {
-    const empty = { type: '', location: '', minPrice: '', maxPrice: '', status: '', q: '' };
+    const empty = { type: '', location: '', minPrice: '', maxPrice: '', status: '', q: '', listing: '' };
     setFilters(empty);
     load(empty);
   };
@@ -160,6 +182,13 @@ export function Inventory() {
       />
 
       <div className="filter-bar">
+        <Field label="Listing">
+          <select className="select" value={filters.listing} onChange={setF('listing')}>
+            <option value="">All</option>
+            <option value="sale">🏷️ For Sale</option>
+            <option value="rent">🏠 For Rent</option>
+          </select>
+        </Field>
         <Field label="Type">
           <select className="select" value={filters.type} onChange={setF('type')}>
             <option value="">All</option>
@@ -202,10 +231,15 @@ export function Inventory() {
                   </div>
                   <Badge status={p.status} />
                 </div>
-                <div className="prop-price">{p.price ? pkr(p.price) : 'Price on request'}</div>
+                <div className="prop-price">
+                  {p.listingType === 'rent'
+                    ? (p.rentPerMonth ? `${pkr(p.rentPerMonth)} / month` : 'Rent on request')
+                    : (p.price ? pkr(p.price) : 'Price on request')}
+                </div>
                 <div className="prop-meta">
                   <span>{prettyLabel(p.type)}</span>
                   <span>{areaStr(p.areaValue, p.areaUnit)}</span>
+                  <span>{p.listingType === 'rent' ? '🏠 For Rent' : '🏷️ For Sale'}</span>
                 </div>
               </div>
             </Link>
@@ -362,10 +396,13 @@ export function PropertyDetail() {
           <dl className="kv">
             <dt>Status</dt><dd><Badge status={prop.status} /></dd>
             <dt>Type</dt><dd>{prettyLabel(prop.type)}</dd>
-            <dt>Listing</dt><dd>{prop.listingType === 'sale' ? '🏷️ For Sale' : prettyLabel(prop.listingType || 'sale')}</dd>
+            <dt>Listing</dt><dd>{prop.listingType === 'rent' ? '🏠 For Rent' : prop.listingType === 'sale' ? '🏷️ For Sale' : prettyLabel(prop.listingType || 'sale')}</dd>
             <dt>Location</dt><dd>{prop.location || '—'}</dd>
             <dt>Area</dt><dd>{areaStr(prop.areaValue, prop.areaUnit)}</dd>
-            <dt>Price</dt><dd><strong>{prop.price ? pkr(prop.price) : 'Price on request'}</strong></dd>
+            <dt>{prop.listingType === 'rent' ? 'Rent / month' : 'Price'}</dt>
+            <dd><strong>{prop.listingType === 'rent'
+              ? (prop.rentPerMonth ? `${pkr(prop.rentPerMonth)} / month` : 'Rent on request')
+              : (prop.price ? pkr(prop.price) : 'Price on request')}</strong></dd>
             <dt>Description</dt><dd>{prop.description || '—'}</dd>
           </dl>
         </Card>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { get, post, put, del, qs, asArray } from '../api';
 import { useAuth } from '../auth';
 import {
@@ -51,6 +51,7 @@ function LeadForm({ initial, agents = [], canAssign = false, onSaved, onCancel }
           <select className="select" value={f.intent || 'buy'} onChange={set('intent')}>
             <option value="buy">🛒 Buy</option>
             <option value="sell">🏷️ Sell</option>
+            <option value="rent">🏠 Rent</option>
           </select>
         </Field>
       </div>
@@ -86,6 +87,8 @@ function LeadForm({ initial, agents = [], canAssign = false, onSaved, onCancel }
 
 export function Leads() {
   const { canAssign } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [leads, setLeads] = useState([]);
   const [stage, setStage] = useState('');
   const [intent, setIntent] = useState('');
@@ -117,6 +120,11 @@ export function Leads() {
   useEffect(() => {
     load('', '', '', '');
     if (canAssign) get('/api/users/agents').then((r) => setAgents(asArray(r))).catch(() => {});
+    // Quick Add from the dashboard navigates here with { openNew: true }.
+    if (location.state?.openNew) {
+      setShowNew(true);
+      navigate(location.pathname, { replace: true, state: {} });
+    }
   }, []);
 
   const stageOptions = useMemo(() => {
@@ -142,11 +150,12 @@ export function Leads() {
             {stageOptions.map((s) => <option key={s} value={s}>{prettyLabel(s)}</option>)}
           </select>
         </Field>
-        <Field label="Buy / Sell">
+        <Field label="Buy / Sell / Rent">
           <select className="select" value={intent} onChange={(e) => { setIntent(e.target.value); load(stage, q, e.target.value, society); }}>
-            <option value="">Buy &amp; Sell</option>
+            <option value="">Buy, Sell &amp; Rent</option>
             <option value="buy">🛒 Buy</option>
             <option value="sell">🏷️ Sell</option>
+            <option value="rent">🏠 Rent</option>
           </select>
         </Field>
         <Field label="Society">
@@ -371,7 +380,7 @@ export function LeadDetail() {
       <BackLink to="/leads" label="Leads" />
       <PageHeader
         title={lead.name}
-        sub={`${lead.intent === 'sell' ? '🏷️ Sell' : '🛒 Buy'}${lead.society ? ` · ${lead.society}` : ''} · ${lead.phone || 'no phone'} · Source: ${lead.source || '—'}`}
+        sub={`${lead.intent === 'sell' ? '🏷️ Sell' : lead.intent === 'rent' ? '🏠 Rent' : '🛒 Buy'}${lead.society ? ` · ${lead.society}` : ''} · ${lead.phone || 'no phone'} · Source: ${lead.source || '—'}`}
         actions={
           <>
             <WaButton phone={lead.whatsapp || lead.phone} name={lead.name} className="btn btn-secondary btn-sm" />

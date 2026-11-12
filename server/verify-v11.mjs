@@ -87,7 +87,7 @@ const socFilter = await get('/api/leads?society=Model%20City', adminTok);
 check('society filter returns only Model City', Array.isArray(socFilter.json) && socFilter.json.length > 0 && socFilter.json.every((l) => l.society === 'Model City'), `n=${socFilter.json?.length}`);
 const comboFilter = await get('/api/leads?intent=buy&society=Model%20City', adminTok);
 check('intent+society compose', Array.isArray(comboFilter.json) && comboFilter.json.every((l) => l.intent === 'buy' && l.society === 'Model City'), `n=${comboFilter.json?.length}`);
-const badIntent = await post('/api/leads', adminTok, { name: 'Bad', intent: 'rent' });
+const badIntent = await post('/api/leads', adminTok, { name: 'Bad', intent: 'lease' });
 check('invalid intent 400', badIntent.status === 400);
 const stageMove = await post(`/api/leads/${leadId}/stage`, adminTok, { stage: 'contacted' });
 check('lead stage move', stageMove.status === 200 && stageMove.json?.stage === 'contacted');

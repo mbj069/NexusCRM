@@ -4,6 +4,12 @@
 // the remainder (deal value − token − bayana − installments total) when
 // not given explicitly.
 //
+// Rental deals use a simplified two-stage plan: an optional token/advance,
+// then the final first month's rent (deal value − token). No bayana stage,
+// no installments — passing any is a 400. The schedule builder below
+// already emits token (if > 0) then final when bayana and installments
+// are zero, so rentals reuse it unchanged.
+//
 // Legacy field names are still accepted as aliases on create
 // (downPayment → token, possessionAmount → final) so older clients keep
 // working.
@@ -47,12 +53,24 @@ router.post('/', ah(async (req, res) => {
 
   // Token defaults to 0; bayana defaults to the deal's earnest amount.
   const token = Number(tokenAmount ?? downPayment ?? 0) || 0;
-  const bayana = Number(bayanaAmount ?? deal.bayana_amount ?? 0) || 0;
+  let bayana = Number(bayanaAmount ?? deal.bayana_amount ?? 0) || 0;
   const n = Math.floor(Number(numInstallments) || 0);
   const inst = Number(installmentAmount) || 0;
+  // Rental deals: no bayana, no installments — only an optional advance
+  // (token) and the final first month's rent. Reject any bayana or
+  // installment input outright; force bayana to 0 and recompute final.
+  const prop = await db.prepare('SELECT listing_type FROM properties WHERE id = ?').get(deal.property_id);
+  const isRental = prop?.listing_type === 'rent';
+  if (isRental) {
+    if ((Number(bayanaAmount) || 0) > 0 || n > 0 || inst > 0) {
+      throw httpError(400, 'Rental plans have no bayana or installments — only an optional advance (token) and the final first month\u2019s rent.');
+    }
+    bayana = 0;
+  }
   // Final defaults to the remainder so the plan always adds up.
-  const final = finalAmount !== undefined && finalAmount !== null && finalAmount !== ''
+  let final = finalAmount !== undefined && finalAmount !== null && finalAmount !== ''
     ? Number(finalAmount) : deal.deal_value - token - bayana - n * inst;
+  if (isRental) final = deal.deal_value - token;
   if (token < 0 || bayana < 0 || n < 0 || inst < 0 || final < 0) throw httpError(400, 'Amounts cannot be negative.');
   const total = token + bayana + n * inst + final;
   if (!(total > 0)) throw httpError(400, 'Plan total must be positive.');

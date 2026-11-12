@@ -177,7 +177,7 @@ export async function initSchema() {
       source TEXT NOT NULL DEFAULT 'manual'
         CHECK (source IN ('website','WhatsApp','social','manual','referral')),
       interest TEXT NOT NULL DEFAULT '',
-      intent TEXT NOT NULL DEFAULT 'buy' CHECK (intent IN ('buy','sell')),
+      intent TEXT NOT NULL DEFAULT 'buy' CHECK (intent IN ('buy','sell','rent')),
       society TEXT NOT NULL DEFAULT '',
       budget_min REAL NOT NULL DEFAULT 0,
       budget_max REAL NOT NULL DEFAULT 0,
@@ -230,11 +230,12 @@ export async function initSchema() {
       area_value REAL NOT NULL DEFAULT 0,
       area_unit TEXT NOT NULL DEFAULT 'marla' CHECK (area_unit IN ('marla','kanal','sqft')),
       price REAL NOT NULL DEFAULT 0,
+      rent_per_month REAL,
       status TEXT NOT NULL DEFAULT 'Available'
-        CHECK (status IN ('Available','Booked','Sold','Blocked')),
+        CHECK (status IN ('Available','Booked','Sold','Rented','Blocked')),
       description TEXT NOT NULL DEFAULT '',
       owner_id TEXT REFERENCES users(id),
-      listing_type TEXT NOT NULL DEFAULT 'sale' CHECK (listing_type IN ('sale')),
+      listing_type TEXT NOT NULL DEFAULT 'sale' CHECK (listing_type IN ('sale','rent')),
       seller_contact_id TEXT REFERENCES contacts(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -397,6 +398,7 @@ export async function initSchema() {
   }
 
   await migrateV11();
+  await migrateV12();
 
   await db.prepare('INSERT OR IGNORE INTO ai_config (id) VALUES (1)').run();
   await db.prepare('INSERT OR IGNORE INTO whatsapp_config (id) VALUES (1)').run();
@@ -548,6 +550,109 @@ async function migrateV11() {
 
   // --- Commissions: manual override flag ------------------------------------
   await addColumnIfMissing('commissions', 'manual INTEGER NOT NULL DEFAULT 0', 'manual');
+}
+
+// --- v1.2 migrations: rentals -------------------------------------------------
+// Properties gain listing_type 'rent' + rent_per_month + 'Rented' status;
+// leads gain intent 'rent'. Both CHECK changes need a table rebuild, done
+// with the same in-batch PRAGMA + DROP IF EXISTS _new pattern as migrateV11
+// (a standalone PRAGMA call is lost over Turso HTTP — see v1.1 lesson).
+// Every step is idempotent via a schema probe, so fresh databases (already
+// on the new CREATE TABLE shape) and upgraded v1.1 databases end up identical.
+
+async function migrateV12() {
+  // --- Properties: rent listings + Rented status -----------------------------
+  const propSql = await tableSql('properties');
+  if (!propSql.includes("'sale','rent'")) {
+    await db.exec(`
+        PRAGMA foreign_keys = OFF;
+        DROP TABLE IF EXISTS properties_new;
+        CREATE TABLE properties_new (
+          id TEXT PRIMARY KEY,
+          code TEXT UNIQUE NOT NULL,
+          type TEXT NOT NULL CHECK (type IN ('plot','house','commercial_land','agriculture_land','shop','commercial_building')),
+          title TEXT NOT NULL,
+          location TEXT NOT NULL DEFAULT '',
+          area_value REAL NOT NULL DEFAULT 0,
+          area_unit TEXT NOT NULL DEFAULT 'marla' CHECK (area_unit IN ('marla','kanal','sqft')),
+          price REAL NOT NULL DEFAULT 0,
+          rent_per_month REAL,
+          status TEXT NOT NULL DEFAULT 'Available'
+            CHECK (status IN ('Available','Booked','Sold','Rented','Blocked')),
+          description TEXT NOT NULL DEFAULT '',
+          owner_id TEXT REFERENCES users(id),
+          listing_type TEXT NOT NULL DEFAULT 'sale' CHECK (listing_type IN ('sale','rent')),
+          seller_contact_id TEXT REFERENCES contacts(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO properties_new (id, code, type, title, location, area_value, area_unit, price,
+            rent_per_month, status, description, owner_id, listing_type, seller_contact_id, created_at, updated_at)
+          SELECT id, code, type, title, location, area_value, area_unit, price,
+            NULL, status, description, owner_id, listing_type, seller_contact_id, created_at, updated_at
+          FROM properties;
+        DROP TABLE properties;
+        ALTER TABLE properties_new RENAME TO properties;
+        PRAGMA foreign_keys = ON;
+      `);
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_status ON properties(status)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_code ON properties(code)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_type ON properties(type)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_properties_seller ON properties(seller_contact_id)');
+  }
+  // Safety net: if the rebuild was skipped but the column is missing
+  // (e.g. a database created between the v1.1 and v1.2 shapes), add it.
+  await addColumnIfMissing('properties', 'rent_per_month REAL', 'rent_per_month');
+
+  // --- Leads: 'rent' intent ---------------------------------------------------
+  // deals.lead_id REFERENCES leads(id), so the DROP needs the in-batch
+  // PRAGMA OFF just like the properties rebuild above.
+  const leadSql = await tableSql('leads');
+  if (!leadSql.includes("'buy','sell','rent'")) {
+    await db.exec(`
+        PRAGMA foreign_keys = OFF;
+        DROP TABLE IF EXISTS leads_new;
+        CREATE TABLE leads_new (
+          id TEXT PRIMARY KEY,
+          contact_id TEXT REFERENCES contacts(id) ON DELETE SET NULL,
+          name TEXT NOT NULL,
+          phone TEXT NOT NULL DEFAULT '',
+          whatsapp TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'manual'
+            CHECK (source IN ('website','WhatsApp','social','manual','referral')),
+          interest TEXT NOT NULL DEFAULT '',
+          intent TEXT NOT NULL DEFAULT 'buy' CHECK (intent IN ('buy','sell','rent')),
+          society TEXT NOT NULL DEFAULT '',
+          budget_min REAL NOT NULL DEFAULT 0,
+          budget_max REAL NOT NULL DEFAULT 0,
+          stage TEXT NOT NULL DEFAULT 'new'
+            CHECK (stage IN ('new','contacted','viewing','negotiating','won','lost')),
+          score INTEGER NOT NULL DEFAULT 0,
+          ai_score REAL,
+          ai_score_reason TEXT NOT NULL DEFAULT '',
+          owner_id TEXT REFERENCES users(id),
+          assigned_to TEXT REFERENCES users(id),
+          notes TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO leads_new (id, contact_id, name, phone, whatsapp, source, interest, intent,
+            society, budget_min, budget_max, stage, score, ai_score, ai_score_reason, owner_id,
+            assigned_to, notes, created_at, updated_at)
+          SELECT id, contact_id, name, phone, whatsapp, source, interest, intent,
+            society, budget_min, budget_max, stage, score, ai_score, ai_score_reason, owner_id,
+            assigned_to, notes, created_at, updated_at
+          FROM leads;
+        DROP TABLE leads;
+        ALTER TABLE leads_new RENAME TO leads;
+        PRAGMA foreign_keys = ON;
+      `);
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_owner ON leads(owner_id)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_assigned ON leads(assigned_to)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_intent ON leads(intent)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_society ON leads(society)');
+  }
 }
 
 // --- Row mappers (snake_case -> camelCase) ----------------------------------

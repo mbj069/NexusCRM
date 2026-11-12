@@ -1,4 +1,4 @@
-# NexusCRM v1.1
+# NexusCRM v1.2
 
 A generic CRM with a property-dealer module. The core (contacts, leads, pipeline,
 follow-ups, users, analytics) works for any small business; the property module
@@ -18,6 +18,21 @@ manual commission overrides (audit-logged); role-specific dashboards (admin
 sees full money totals, manager sees the team view with no grand totals,
 agents see only their own numbers); and every login attempt — success and
 failure — written to the audit log (admin-only to view).
+
+v1.2 adds: rental listings — properties listed "For Rent" with a monthly rent
+(Rs X / month, price stored as 0) and a listing filter (All / For Sale /
+For Rent) that composes with type and status on both the list and search
+endpoints, where price filters use the effective price (rent per month for
+rentals); RENT lead intent; rental deals whose value IS the first month's
+rent (taken from the property, bayana forced to 0) with a manual commission
+— half-month / full-month quick picks or a free amount, stored via the
+manual-commission path (manual=1, audit-logged); simplified two-stage rental
+payment plans (optional advance/token, then the final first month's rent —
+no bayana, no installments); a 'Rented' terminal property status (a closed
+rental deal rents the property instead of selling it); commissions-first
+dashboards (admin Total/Pending commission up front, manager commission
+counts with no money, agent My Total/Pending commission) and a Quick Add
+bar on the dashboard that opens any section's add form.
 
 Stack: React (Vite) frontend · Express backend · Turso (libSQL) database —
 remote Turso in production, local libSQL file in development · bcrypt password
@@ -241,6 +256,17 @@ detail with link/unlink; payment hierarchy Token → Bayana → Installments
 override (audit-logged); role-specific dashboards (admin full totals, manager
 team view without money totals, agent own numbers only); login attempts
 (success and failure) in the audit log, admin-only to view.
+
+**v1.2 — shipped:** rental listings ("For Rent" with rent per month, shown
+as Rs X / month; listing filter composes with type/status; search price
+filters use the effective price); RENT lead intent; rental deals (deal value
+= first month's rent, bayana 0, manual commission via half/full-month picks
+or a free amount, audit-logged); simplified two-stage rental payment plans
+(advance → final first month's rent, no bayana/installments); 'Rented'
+terminal property status on closed rental deals; commissions-first
+dashboards (admin Total/Pending commission, manager commission counts with
+no money, agent My Total/Pending commission) and a Quick Add bar on the
+dashboard that opens each section's add form.
 
 **v2 — deliberately deferred:** full 24/7 AI chat automation on WhatsApp
 (needs the client's Meta approval above); social-channel lead capture; richer

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { get, post, put, qs, asArray } from '../api';
 import {
   PageHeader, Card, Badge, Modal, EmptyState, Spinner, Alert, Field,
@@ -12,6 +12,8 @@ const DEAL_STAGES = ['proposed', 'token_paid', 'in_progress', 'closed_won', 'clo
 const KIND_ICONS = { note: '📝', call: '📞', viewing: '👁️', message: '💬', stage_change: '🔀' };
 
 export function Deals() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [deals, setDeals] = useState([]);
   const [stage, setStage] = useState('');
   const [loading, setLoading] = useState(true);
@@ -30,7 +32,14 @@ export function Deals() {
     }
   };
 
-  useEffect(() => { load(''); }, []);
+  useEffect(() => {
+    load('');
+    // Quick Add from the dashboard navigates here with { openNew: true }.
+    if (location.state?.openNew) {
+      setShowNew(true);
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, []);
 
   return (
     <>
@@ -85,6 +94,9 @@ export function Deals() {
 
 // Payment hierarchy: Token → Bayana → Installments (optional) → Final.
 // Final payment is auto-computed as the remainder and shown before saving.
+// Rental deals use a simplified two-stage plan: an optional token/advance,
+// then the final first month's rent (deal value − advance). No bayana,
+// no installments.
 function PlanGenerator({ deal, lead, onCreated }) {
   const [contacts, setContacts] = useState([]);
   const [contactQ, setContactQ] = useState('');
@@ -124,23 +136,26 @@ function PlanGenerator({ deal, lead, onCreated }) {
   const bayana = Number(form.bayanaAmount) || 0;
   const n = form.hasInstallments ? (Math.floor(Number(form.numInstallments)) || 0) : 0;
   const inst = form.hasInstallments ? (Number(form.installmentAmount) || 0) : 0;
-  const finalAmount = (deal?.dealValue || 0) - token - bayana - n * inst;
+  const isRental = deal?.property?.listingType === 'rent';
+  const finalAmount = isRental
+    ? (deal?.dealValue || 0) - token
+    : (deal?.dealValue || 0) - token - bayana - n * inst;
 
   const submit = async (e) => {
     e.preventDefault();
     setError('');
     if (!contactId) { setError('Pick the buyer contact for this plan.'); return; }
     if (!form.startDate) { setError('Start date is required.'); return; }
-    if (finalAmount < 0) { setError('Token + bayana + installments exceed the deal value — lower an amount.'); return; }
+    if (finalAmount < 0) { setError(isRental ? 'Advance exceeds the monthly rent — lower it.' : 'Token + bayana + installments exceed the deal value — lower an amount.'); return; }
     setBusy(true);
     try {
       const payload = {
         dealId: deal.id,
         contactId,
         tokenAmount: token,
-        bayanaAmount: bayana,
-        numInstallments: n,
-        installmentAmount: inst,
+        bayanaAmount: isRental ? 0 : bayana,
+        numInstallments: isRental ? 0 : n,
+        installmentAmount: isRental ? 0 : inst,
         finalAmount,
         startDate: form.startDate,
       };
@@ -171,35 +186,55 @@ function PlanGenerator({ deal, lead, onCreated }) {
         </datalist>
         <div className="hint">The person paying the installments.</div>
       </Field>
-      <div className="form-row">
-        <Field label="1 · Token money (PKR)"><input className="input" type="number" min="0" value={form.tokenAmount} onChange={set('tokenAmount')} /></Field>
-        <Field label="2 · Bayana (PKR)"><input className="input" type="number" min="0" value={form.bayanaAmount} onChange={set('bayanaAmount')} /></Field>
-      </div>
-      <Field label="3 · Installments">
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 500 }}>
-          <input
-            type="checkbox" checked={form.hasInstallments}
-            onChange={(e) => setForm((s) => ({ ...s, hasInstallments: e.target.checked }))}
-          />
-          Pay in installments (optional)
-        </label>
-      </Field>
-      {form.hasInstallments && (
-        <div className="form-row">
-          <Field label="No. of installments *"><input className="input" type="number" min="0" value={form.numInstallments} onChange={set('numInstallments')} required /></Field>
-          <Field label="Installment amount (PKR)"><input className="input" type="number" min="0" value={form.installmentAmount} onChange={set('installmentAmount')} /></Field>
-        </div>
+      {isRental ? (
+        <>
+          <div className="form-row">
+            <Field label="1 · Advance / token (PKR) — optional"><input className="input" type="number" min="0" value={form.tokenAmount} onChange={set('tokenAmount')} /></Field>
+          </div>
+          <Field label="Start date *"><input className="input" type="date" value={form.startDate} onChange={set('startDate')} required /></Field>
+          <div className="kv" style={{ marginBottom: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderTop: '1px solid var(--border)' }}>
+              <strong>2 · Final payment — first month&apos;s rent (auto-computed)</strong>
+              <strong style={{ color: finalAmount < 0 ? 'var(--red-600)' : 'inherit' }}>{pkr(finalAmount)}</strong>
+            </div>
+          </div>
+          <div className="hint" style={{ marginBottom: 8 }}>
+            Rental plan: advance + final must equal the monthly rent{deal.dealValue ? ` (${pkr(deal.dealValue)})` : ''}. No bayana, no installments.
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="form-row">
+            <Field label="1 · Token money (PKR)"><input className="input" type="number" min="0" value={form.tokenAmount} onChange={set('tokenAmount')} /></Field>
+            <Field label="2 · Bayana (PKR)"><input className="input" type="number" min="0" value={form.bayanaAmount} onChange={set('bayanaAmount')} /></Field>
+          </div>
+          <Field label="3 · Installments">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 500 }}>
+              <input
+                type="checkbox" checked={form.hasInstallments}
+                onChange={(e) => setForm((s) => ({ ...s, hasInstallments: e.target.checked }))}
+              />
+              Pay in installments (optional)
+            </label>
+          </Field>
+          {form.hasInstallments && (
+            <div className="form-row">
+              <Field label="No. of installments *"><input className="input" type="number" min="0" value={form.numInstallments} onChange={set('numInstallments')} required /></Field>
+              <Field label="Installment amount (PKR)"><input className="input" type="number" min="0" value={form.installmentAmount} onChange={set('installmentAmount')} /></Field>
+            </div>
+          )}
+          <Field label="Start date *"><input className="input" type="date" value={form.startDate} onChange={set('startDate')} required /></Field>
+          <div className="kv" style={{ marginBottom: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderTop: '1px solid var(--border)' }}>
+              <strong>4 · Final payment (auto-computed)</strong>
+              <strong style={{ color: finalAmount < 0 ? 'var(--red-600)' : 'inherit' }}>{pkr(finalAmount)}</strong>
+            </div>
+          </div>
+          <div className="hint" style={{ marginBottom: 8 }}>
+            Token + bayana + (installments × amount) + final must equal the deal value{deal.dealValue ? ` (${pkr(deal.dealValue)})` : ''}.
+          </div>
+        </>
       )}
-      <Field label="Start date *"><input className="input" type="date" value={form.startDate} onChange={set('startDate')} required /></Field>
-      <div className="kv" style={{ marginBottom: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderTop: '1px solid var(--border)' }}>
-          <strong>4 · Final payment (auto-computed)</strong>
-          <strong style={{ color: finalAmount < 0 ? 'var(--red-600)' : 'inherit' }}>{pkr(finalAmount)}</strong>
-        </div>
-      </div>
-      <div className="hint" style={{ marginBottom: 8 }}>
-        Token + bayana + (installments × amount) + final must equal the deal value{deal.dealValue ? ` (${pkr(deal.dealValue)})` : ''}.
-      </div>
       <div className="modal-foot">
         <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Generating…' : 'Generate plan'}</button>
       </div>
@@ -306,7 +341,10 @@ export function DealDetail() {
               <dt>Title</dt><dd>{property.title || property.code || '—'}</dd>
               <dt>Location</dt><dd>{property.location || '—'}</dd>
               <dt>Status</dt><dd><Badge status={property.status} /></dd>
-              <dt>Price</dt><dd>{property.price ? pkr(property.price) : '—'}</dd>
+              <dt>{property.listingType === 'rent' ? 'Rent / month' : 'Price'}</dt>
+              <dd>{property.listingType === 'rent'
+                ? (property.rentPerMonth ? `${pkr(property.rentPerMonth)} / month` : '—')
+                : (property.price ? pkr(property.price) : '—')}</dd>
             </dl>
           ) : <EmptyState icon="🏘️" title="No property linked" />}
         </Card>
@@ -315,7 +353,7 @@ export function DealDetail() {
       <Card title="Deal terms" className="section-gap">
         <dl className="kv">
           <dt>Stage</dt><dd><Badge status={deal.stage} /></dd>
-          <dt>Deal value</dt><dd><strong>{deal.dealValue ? pkr(deal.dealValue) : '—'}</strong></dd>
+          <dt>{property.listingType === 'rent' ? "First month's rent" : 'Deal value'}</dt><dd><strong>{deal.dealValue ? pkr(deal.dealValue) : '—'}</strong></dd>
           <dt>Bayana / token money</dt><dd>{deal.bayanaAmount ? pkr(deal.bayanaAmount) : '—'}</dd>
           <dt>Commission</dt>
           <dd>

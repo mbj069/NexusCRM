@@ -53,13 +53,47 @@ router.get('/', ah(async (req, res) => {
 
 // POST /api/deals — transactional: property must be Available; on success it
 // becomes Booked and a pending commission row is created.
+//
+// Rental deals: the deal value IS the first month's rent (taken from the
+// property's rent_per_month — any passed dealValue is ignored), bayana is
+// forced to 0, and the commission is a manual amount, not the auto
+// percent/fixed calculation: `commissionPick` ('half' | 'full' month of
+// rent) or a free `commissionAmount` (>= 0). One of them is required.
+// The commission row is stored with manual=1 and audit-logged
+// COMMISSION_MANUAL, exactly like an admin manual override.
 router.post('/', ah(async (req, res) => {
   const { leadId, propertyId, dealValue, bayanaAmount = 0, commissionType = 'percent',
-    commissionValue = 0, notes = '', agentId } = req.body || {};
+    commissionValue = 0, notes = '', agentId, commissionPick, commissionAmount: manualComm } = req.body || {};
   if (!propertyId) throw httpError(400, 'propertyId is required.');
-  if (!(Number(dealValue) > 0)) throw httpError(400, 'dealValue must be a positive number.');
-  if (!VALID_COMMISSION_TYPES.includes(commissionType)) {
-    throw httpError(400, `commissionType must be one of: ${VALID_COMMISSION_TYPES.join(', ')}.`);
+  const propRow = await db.prepare('SELECT * FROM properties WHERE id = ?').get(propertyId);
+  if (!propRow) throw httpError(404, 'Property not found.');
+  const isRental = propRow.listing_type === 'rent';
+  let value;
+  let commType = commissionType;
+  let commValue = Number(commissionValue) || 0;
+  let commAmount;
+  if (isRental) {
+    if (!(Number(propRow.rent_per_month) > 0)) throw httpError(400, 'Rental property has no rent per month set.');
+    value = Number(propRow.rent_per_month);
+    const hasAmount = manualComm !== undefined && manualComm !== null && manualComm !== '';
+    if (!commissionPick && !hasAmount) {
+      throw httpError(400, 'Rental deals need a commission: commissionPick ("half" or "full") or a manual commissionAmount.');
+    }
+    if (commissionPick && !['half', 'full'].includes(commissionPick)) {
+      throw httpError(400, 'commissionPick must be "half" or "full".');
+    }
+    if (hasAmount && !(Number(manualComm) >= 0)) throw httpError(400, 'commissionAmount must be zero or more.');
+    commAmount = hasAmount ? Number(manualComm)
+      : commissionPick === 'full' ? value : value / 2;
+    commType = 'fixed';
+    commValue = commAmount;
+  } else {
+    if (!(Number(dealValue) > 0)) throw httpError(400, 'dealValue must be a positive number.');
+    if (!VALID_COMMISSION_TYPES.includes(commissionType)) {
+      throw httpError(400, `commissionType must be one of: ${VALID_COMMISSION_TYPES.join(', ')}.`);
+    }
+    value = Number(dealValue);
+    commAmount = commissionAmount(value, commType, commValue);
   }
   if (leadId) {
     const lead = await db.prepare('SELECT id, assigned_to FROM leads WHERE id = ?').get(leadId);
@@ -72,9 +106,6 @@ router.post('/', ah(async (req, res) => {
   if (!agentRow) throw httpError(400, 'Agent not found.');
 
   const dealId = uid();
-  const value = Number(dealValue);
-  const commValue = Number(commissionValue) || 0;
-  const commAmount = commissionAmount(value, commissionType, commValue);
 
   await withTransaction(async (tx) => {
     const prop = await tx.prepare('SELECT * FROM properties WHERE id = ?').get(propertyId);
@@ -85,14 +116,18 @@ router.post('/', ah(async (req, res) => {
     await tx.prepare(`INSERT INTO deals (id, lead_id, property_id, agent_id, stage, deal_value,
         bayana_amount, commission_type, commission_value, notes)
       VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)`)
-      .run(dealId, leadId || null, propertyId, agent, value, Number(bayanaAmount) || 0,
-        commissionType, commValue, String(notes));
+      .run(dealId, leadId || null, propertyId, agent, value, isRental ? 0 : (Number(bayanaAmount) || 0),
+        commType, commValue, String(notes));
     await tx.prepare(`UPDATE properties SET status = 'Booked', updated_at = datetime('now') WHERE id = ?`)
       .run(propertyId);
     const commId = uid();
-    await tx.prepare('INSERT INTO commissions (id, deal_id, agent_id, amount, status) VALUES (?, ?, ?, ?, ?)')
-      .run(commId, dealId, agent, commAmount, 'pending');
-    await auditReq(req, 'DEAL_CREATE', { entityType: 'deal', entityId: dealId, details: `Deal created: ${prop.code} @ ${value} (agent ${agent}).` }, tx);
+    await tx.prepare('INSERT INTO commissions (id, deal_id, agent_id, amount, status, manual) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(commId, dealId, agent, commAmount, 'pending', isRental ? 1 : 0);
+    if (isRental) {
+      await auditReq(req, 'COMMISSION_MANUAL', { entityType: 'commission', entityId: commId,
+        details: `Rental commission set manually (deal ${dealId}, agent ${agent}): ${commAmount}${commissionPick ? ` (${commissionPick} month of rent)` : ' (manual amount)'}.` }, tx);
+    }
+    await auditReq(req, 'DEAL_CREATE', { entityType: 'deal', entityId: dealId, details: `Deal created: ${prop.code} @ ${value}${isRental ? ' (rental, first month rent)' : ''} (agent ${agent}).` }, tx);
     await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: propertyId, details: `Property ${prop.code} booked by deal ${dealId}.` }, tx);
   });
 
@@ -136,6 +171,13 @@ router.put('/:id', ah(async (req, res) => {
   }
   const { leadId, dealValue, bayanaAmount, commissionType, commissionValue, notes, agentId } = req.body || {};
   if (isAgent(req) && agentId && agentId !== req.user.sub) throw httpError(403, 'Agents cannot reassign deals.');
+  // Rental deal value is the monthly rent — it is set from the property at
+  // creation and is not editable.
+  if (dealValue !== undefined) {
+    const prop = row.property_id
+      ? await db.prepare('SELECT listing_type FROM properties WHERE id = ?').get(row.property_id) : null;
+    if (prop?.listing_type === 'rent') throw httpError(400, 'Rental deal value is the monthly rent and cannot be changed.');
+  }
   if (commissionType !== undefined && !VALID_COMMISSION_TYPES.includes(commissionType)) {
     throw httpError(400, `commissionType must be one of: ${VALID_COMMISSION_TYPES.join(', ')}.`);
   }
@@ -160,8 +202,8 @@ router.put('/:id', ah(async (req, res) => {
 }));
 
 // POST /api/deals/:id/stage { stage }
-// closed_won -> property Sold; closed_lost/cancelled -> property Available;
-// token_paid/in_progress keep Booked.
+// closed_won -> property Sold (sale) or Rented (rental); closed_lost/
+// cancelled -> property Available; token_paid/in_progress keep Booked.
 router.post('/:id/stage', ah(async (req, res) => {
   const row = await db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Deal not found.');
@@ -174,9 +216,11 @@ router.post('/:id/stage', ah(async (req, res) => {
     await tx.prepare(`UPDATE deals SET stage = ?, updated_at = datetime('now') WHERE id = ?`).run(stage, req.params.id);
     const prop = row.property_id ? await tx.prepare('SELECT * FROM properties WHERE id = ?').get(row.property_id) : null;
     if (prop) {
-      if (stage === 'closed_won' && prop.status !== 'Sold') {
-        await tx.prepare(`UPDATE properties SET status = 'Sold', updated_at = datetime('now') WHERE id = ?`).run(prop.id);
-        await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: prop.id, details: `Property ${prop.code} sold via deal ${req.params.id}.` }, tx);
+      if (stage === 'closed_won' && prop.status !== 'Sold' && prop.status !== 'Rented') {
+        const isRental = prop.listing_type === 'rent';
+        const nextStatus = isRental ? 'Rented' : 'Sold';
+        await tx.prepare(`UPDATE properties SET status = ?, updated_at = datetime('now') WHERE id = ?`).run(nextStatus, prop.id);
+        await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: prop.id, details: `Property ${prop.code} ${isRental ? 'rented' : 'sold'} via deal ${req.params.id}.` }, tx);
       } else if ((stage === 'closed_lost' || stage === 'cancelled') && prop.status === 'Booked') {
         await tx.prepare(`UPDATE properties SET status = 'Available', updated_at = datetime('now') WHERE id = ?`).run(prop.id);
         await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: prop.id, details: `Property ${prop.code} released (deal ${req.params.id} ${stage}).` }, tx);

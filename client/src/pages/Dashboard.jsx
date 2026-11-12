@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { get, post, asArray, asKeyCounts } from '../api';
 import { useAuth } from '../auth';
 import {
@@ -9,6 +9,7 @@ import {
 
 export default function Dashboard() {
   const { isAdmin, isManager } = useAuth();
+  const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -54,6 +55,10 @@ export default function Dashboard() {
   const role = data?.role || 'agent';
   const revenue = data?.revenue || null;
   const commissionTotals = data?.commissionTotals || null;
+  const totalCommission = data?.totalCommission ?? ((commissionTotals?.pending || 0) + (commissionTotals?.paid || 0));
+  const pendingCommission = data?.pendingCommission ?? commissionTotals?.pending;
+  const myTotalCommission = data?.myTotalCommission ?? ((data?.myCommissions?.pending || 0) + (data?.myCommissions?.paid || 0));
+  const myPendingCommission = data?.myPendingCommission ?? data?.myCommissions?.pending;
   const leadsByStage = asKeyCounts(data?.leadsByStage, 'stage');
   const dealsByStage = asKeyCounts(data?.dealsByStage, 'stage');
   const inventoryByStatus = asKeyCounts(data?.inventoryByStatus, 'status');
@@ -86,13 +91,24 @@ export default function Dashboard() {
 
       {scanMsg && <Alert kind={scanMsg.startsWith('Scan failed') ? 'error' : 'ok'}>{scanMsg}</Alert>}
 
+      {/* Quick Add — every button is open to every role, mirroring the
+          create routes (all require only the 'crm' permission, which all
+          three roles hold) and the list pages' unconditional Add buttons. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+        <button className="btn btn-secondary btn-sm" onClick={() => navigate('/leads', { state: { openNew: true } })}>+ Add lead</button>
+        <button className="btn btn-secondary btn-sm" onClick={() => navigate('/inventory', { state: { openNew: true } })}>+ Add property</button>
+        <button className="btn btn-secondary btn-sm" onClick={() => navigate('/contacts', { state: { openNew: true } })}>+ Add contact</button>
+        <button className="btn btn-secondary btn-sm" onClick={() => navigate('/deals', { state: { openNew: true } })}>+ Add deal</button>
+        <button className="btn btn-secondary btn-sm" onClick={() => navigate('/followups', { state: { openNew: true } })}>+ Add follow-up</button>
+      </div>
+
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
         {isAdmin && (
           <>
-            <Stat label="Collected" value={pkr(revenue?.collected)} sub="Payments received" accent />
+            <Stat label="Total commission" value={pkr(totalCommission)} sub="Pending + paid, all deals" accent />
+            <Stat label="Pending commission" value={pkr(pendingCommission)} sub="Owed to agents" />
+            <Stat label="Collected" value={pkr(revenue?.collected)} sub="Payments received" />
             <Stat label="Expected" value={pkr(revenue?.expected)} sub="Still outstanding" />
-            <Stat label="Overdue installments" value={overdue.length} sub={data?.overdueTotal ? `${pkr(data.overdueTotal)} outstanding` : 'Need follow-up'} />
-            <Stat label="Active leads" value={totalLeads} sub="Across all stages" />
           </>
         )}
         {isManager && !isAdmin && (
@@ -105,29 +121,26 @@ export default function Dashboard() {
         )}
         {role === 'agent' && (
           <>
-            <Stat label="My assigned leads" value={totalLeads} sub="Across all stages" accent />
-            <Stat label="My open deals" value={openDeals} sub="Proposed / token / in progress" />
-            <Stat label="My overdue installments" value={overdue.length} sub="Need follow-up" />
-            <Stat label="My follow-ups" value={(followups.overdue || 0) + (followups.dueToday || 0)} sub={`${followups.overdue || 0} overdue · ${followups.dueToday || 0} due today`} />
+            <Stat label="My total commission" value={pkr(myTotalCommission)} sub="Pending + paid, my deals" accent />
+            <Stat label="My pending commission" value={pkr(myPendingCommission)} sub="Earned, not yet paid" />
+            <Stat label="My assigned leads" value={totalLeads} sub="Across all stages" />
+            <Stat label="My open deals" value={openDeals} sub={data?.myDeals?.openValue ? `${pkr(data.myDeals.openValue)} in open deals` : 'Proposed / token / in progress'} />
           </>
         )}
       </div>
 
       {isAdmin && commissionTotals && (
         <div className="grid grid-4" style={{ marginBottom: 16 }}>
-          <Stat label="Commission pending" value={pkr(commissionTotals.pending)} sub="Owed to agents" />
           <Stat label="Commission paid" value={pkr(commissionTotals.paid)} sub="Paid out" />
-          <Stat label="Commission total" value={pkr((commissionTotals.pending || 0) + (commissionTotals.paid || 0))} sub="All deals" />
           <Stat label="Overdue total" value={pkr(data?.overdueTotal)} sub={`${overdue.length} overdue installment(s)`} />
+          <Stat label="Overdue installments" value={overdue.length} sub={data?.overdueTotal ? `${pkr(data.overdueTotal)} outstanding` : 'Need follow-up'} />
+          <Stat label="Active leads" value={totalLeads} sub="Across all stages" />
         </div>
       )}
 
-      {role === 'agent' && data?.myCommissions && (
+      {isManager && !isAdmin && data?.commissionCounts && (
         <div className="grid grid-4" style={{ marginBottom: 16 }}>
-          <Stat label="My commission pending" value={pkr(data.myCommissions.pending)} sub="Earned, not yet paid" />
-          <Stat label="My commission paid" value={pkr(data.myCommissions.paid)} sub="Paid out to me" />
-          <Stat label="My open deals value" value={pkr(data.myDeals?.openValue)} sub={`${data.myDeals?.open || 0} open deal(s)`} />
-          <Stat label="My overdue" value={overdue.length} sub="Installments to chase" />
+          <Stat label="Commissions pending" value={data.commissionCounts.pending} sub={`${data.commissionCounts.paid || 0} paid · counts only, no amounts`} />
         </div>
       )}
 
@@ -272,6 +285,7 @@ export default function Dashboard() {
                     <th>Agent</th><th className="num">Leads assigned</th><th className="num">Open deals</th>
                     <th className="num">Closed</th>
                     {isAdmin && <><th className="num">Revenue</th><th className="num">Commission</th></>}
+                    {isManager && !isAdmin && <><th className="num">Comm. pending</th><th className="num">Comm. paid</th></>}
                   </tr>
                 </thead>
                 <tbody>
@@ -285,6 +299,12 @@ export default function Dashboard() {
                         <>
                           <td className="num">{pkr(a.revenue)}</td>
                           <td className="num">{pkr(a.commissionEarned ?? a.commission)}</td>
+                        </>
+                      )}
+                      {isManager && !isAdmin && (
+                        <>
+                          <td className="num">{a.commissionPendingCount ?? 0}</td>
+                          <td className="num">{a.commissionPaidCount ?? 0}</td>
                         </>
                       )}
                     </tr>

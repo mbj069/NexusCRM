@@ -60,7 +60,7 @@ export function asKeyCounts(data, keyName = 'key') {
 /* ---------- Status badge colors ---------- */
 
 const STATUS_COLORS = {
-  available: 'b-green', booked: 'b-amber', sold: 'b-slate', blocked: 'b-red',
+  available: 'b-green', booked: 'b-amber', sold: 'b-slate', rented: 'b-indigo', blocked: 'b-red',
   active: 'b-green', pending: 'b-amber', overdue: 'b-red', paid: 'b-green',
   done: 'b-green', complete: 'b-green', completed: 'b-green',
   proposed: 'b-blue', token_paid: 'b-indigo', in_progress: 'b-amber',
@@ -68,7 +68,7 @@ const STATUS_COLORS = {
   won: 'b-green', lost: 'b-slate',
   new: 'b-blue', contacted: 'b-indigo', qualified: 'b-amber',
   negotiating: 'b-amber', viewing: 'b-indigo',
-  buyer: 'b-blue', seller: 'b-amber',
+  buyer: 'b-blue', seller: 'b-amber', rent: 'b-indigo',
   unread: 'b-indigo', read: 'b-slate',
 };
 
