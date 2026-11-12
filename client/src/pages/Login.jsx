@@ -69,7 +69,7 @@ export default function Login() {
           <div className="brand-mark">N</div>
           <div>
             <h1>NexusCRM</h1>
-            <p>Property Dealer CRM</p>
+            <p>Real Estate CRM</p>
           </div>
         </div>
 

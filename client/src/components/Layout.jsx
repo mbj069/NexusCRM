@@ -110,7 +110,7 @@ export default function Layout() {
           <div className="brand-mark">N</div>
           <div>
             <div className="brand-name">NexusCRM</div>
-            <div className="brand-sub">Property Dealer CRM</div>
+            <div className="brand-sub">Real Estate CRM</div>
           </div>
         </div>
         <nav className="nav">
