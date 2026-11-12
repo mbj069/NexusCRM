@@ -11,7 +11,8 @@
 //
 // Agents see only their own rows, and never owner totals: for agents the
 // list response omits the owner `summary` entirely and returns only
-// `agentSummary` (their share figures).
+// `agentSummary` (their share figures), and every row is stripped of the
+// owner fields (amount/status/paid_at/manual) — share fields only.
 
 import { Router } from 'express';
 import { db, camel } from '../db.js';
@@ -22,6 +23,16 @@ import { ah, httpError, uid, todayStr } from '../util.js';
 
 const router = Router();
 router.use(requireAuth, requirePermission('crm'));
+
+// Owner fields an agent must never see on a commission row: the owner's
+// total (amount/status/paid_at/manual). Agents keep only their share
+// fields plus identifiers. Same stripping as deals.js does for embedded
+// commission rows — the list endpoint must not leak what the detail
+// endpoint hides.
+function stripOwnerFields(row) {
+  const { amount, status, paidAt, manual, ...shareOnly } = row;
+  return shareOnly;
+}
 
 // GET /api/commissions?agentId=&status=&from=&to=
 // Agents are always scoped to their own rows, regardless of query params.
@@ -55,7 +66,7 @@ router.get('/', ah(async (req, res) => {
     agentPaid: rows.filter((r) => r.agentStatus === 'paid').reduce((s, r) => s + (r.agentAmount || 0), 0),
   };
   if (req.user.role === 'agent') {
-    return res.json({ commissions: rows, agentSummary });
+    return res.json({ commissions: rows.map(stripOwnerFields), agentSummary });
   }
   const summary = {
     pending: rows.filter((r) => r.status === 'pending').reduce((s, r) => s + r.amount, 0),
