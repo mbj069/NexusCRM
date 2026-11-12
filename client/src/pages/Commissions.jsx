@@ -4,19 +4,24 @@ import { get, post, put, qs, asArray } from '../api';
 import { useAuth } from '../auth';
 import {
   PageHeader, Card, Badge, EmptyState, Spinner, Alert, Field, Modal,
-  pkr, fmtDate,
+  pkr, fmtDate, fmtDateTime,
 } from '../components/ui';
 
 export default function Commissions() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, isAgent } = useAuth();
   const [rows, setRows] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [agentSummary, setAgentSummary] = useState(null);
   const [filters, setFilters] = useState({ agentId: '', status: '', from: '', to: '' });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [paying, setPaying] = useState(null);
+  const [payingShare, setPayingShare] = useState(null);
   const [editing, setEditing] = useState(null);
   const [editAmount, setEditAmount] = useState('');
   const [editStatus, setEditStatus] = useState('pending');
+  const [editShareAmount, setEditShareAmount] = useState('');
+  const [editShareStatus, setEditShareStatus] = useState('pending');
   const [editBusy, setEditBusy] = useState(false);
   const [editError, setEditError] = useState('');
 
@@ -24,7 +29,14 @@ export default function Commissions() {
     setLoading(true);
     setError('');
     try {
-      setRows(asArray(await get('/api/commissions' + qs(f))));
+      const res = await get('/api/commissions' + qs(f));
+      setRows(asArray(res));
+      // Server envelope: { commissions, summary: { pending, paid },
+      // agentSummary: { agentPending, agentPaid } }. Agents receive only
+      // agentSummary; fall back to client-computed totals when absent.
+      const obj = res && typeof res === 'object' && !Array.isArray(res) ? res : {};
+      setSummary(obj.summary || null);
+      setAgentSummary(obj.agentSummary || null);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -49,12 +61,28 @@ export default function Commissions() {
     }
   };
 
-  // Admin-only manual override: set the amount and/or status independent
-  // of the auto percent/fixed calculation. Audit-logged server-side.
+  const markSharePaid = async (row) => {
+    if (!window.confirm(`Mark agent share of ${pkr(row.agentAmount)} as paid?`)) return;
+    setPayingShare(row.id);
+    try {
+      await post(`/api/commissions/${row.id}/pay-agent-share`);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPayingShare(null);
+    }
+  };
+
+  // Admin-only manual override: set the owner amount/status and/or the
+  // agent share amount/status independent of the auto calculation.
+  // Audit-logged server-side.
   const openEdit = (row) => {
     setEditing(row);
     setEditAmount(String(row.amount ?? ''));
     setEditStatus(row.status || 'pending');
+    setEditShareAmount(row.agentAmount === null || row.agentAmount === undefined ? '' : String(row.agentAmount));
+    setEditShareStatus(row.agentStatus || 'pending');
     setEditError('');
   };
 
@@ -64,7 +92,10 @@ export default function Commissions() {
     setEditBusy(true);
     setEditError('');
     try {
-      await put(`/api/commissions/${editing.id}`, { amount: Number(editAmount), status: editStatus });
+      const payload = { amount: Number(editAmount), status: editStatus };
+      if (editShareAmount !== '') payload.agentAmount = Number(editShareAmount);
+      payload.agentStatus = editShareStatus;
+      await put(`/api/commissions/${editing.id}`, payload);
       setEditing(null);
       load();
     } catch (err) {
@@ -74,17 +105,41 @@ export default function Commissions() {
     }
   };
 
-  const totals = rows.reduce(
+  // Client-computed fallback totals (used only when the server did not
+  // send summary / agentSummary).
+  const computed = rows.reduce(
     (s, r) => {
       const amt = Number(r.amount) || 0;
-      s.all += amt;
-      const st = String(r.status || '').toLowerCase();
-      if (st === 'paid') s.paid += amt;
-      else s.unpaid += amt;
+      const share = Number(r.agentAmount) || 0;
+      s.ownerAll += amt;
+      s.shareAll += share;
+      if (String(r.status || '').toLowerCase() === 'paid') s.ownerPaid += amt;
+      else s.ownerUnpaid += amt;
+      if (String(r.agentStatus || '').toLowerCase() === 'paid') s.sharePaid += share;
+      else s.shareUnpaid += share;
       return s;
     },
-    { all: 0, paid: 0, unpaid: 0 }
+    { ownerAll: 0, ownerPaid: 0, ownerUnpaid: 0, shareAll: 0, sharePaid: 0, shareUnpaid: 0 }
   );
+
+  const ownerTotals = summary
+    ? {
+      all: (summary.total ?? (Number(summary.pending) || 0) + (Number(summary.paid) || 0)),
+      paid: Number(summary.paid) || 0,
+      unpaid: Number(summary.pending) || 0,
+    }
+    : { all: computed.ownerAll, paid: computed.ownerPaid, unpaid: computed.ownerUnpaid };
+
+  const shareTotals = agentSummary
+    ? {
+      all: (agentSummary.total ?? (Number(agentSummary.agentPending) || 0) + (Number(agentSummary.agentPaid) || 0)),
+      paid: Number(agentSummary.agentPaid) || 0,
+      unpaid: Number(agentSummary.agentPending) || 0,
+    }
+    : { all: computed.shareAll, paid: computed.sharePaid, unpaid: computed.shareUnpaid };
+
+  // Agents see ONLY their share figures — never owner amounts.
+  const showOwner = !isAgent;
 
   return (
     <>
@@ -92,10 +147,18 @@ export default function Commissions() {
 
       {error && <Alert kind="error">{error}</Alert>}
 
+      {showOwner && (
+        <div className="grid grid-3" style={{ marginBottom: 16 }}>
+          <div className="stat accent"><div className="stat-label">Total commission</div><div className="stat-value">{pkr(ownerTotals.all)}</div></div>
+          <div className="stat"><div className="stat-label">Paid out</div><div className="stat-value">{pkr(ownerTotals.paid)}</div></div>
+          <div className="stat"><div className="stat-label">Unpaid</div><div className="stat-value">{pkr(ownerTotals.unpaid)}</div></div>
+        </div>
+      )}
+
       <div className="grid grid-3" style={{ marginBottom: 16 }}>
-        <div className="stat accent"><div className="stat-label">Total commission</div><div className="stat-value">{pkr(totals.all)}</div></div>
-        <div className="stat"><div className="stat-label">Paid out</div><div className="stat-value">{pkr(totals.paid)}</div></div>
-        <div className="stat"><div className="stat-label">Unpaid</div><div className="stat-value">{pkr(totals.unpaid)}</div></div>
+        <div className="stat accent"><div className="stat-label">Total agent share</div><div className="stat-value">{pkr(shareTotals.all)}</div></div>
+        <div className="stat"><div className="stat-label">Share paid</div><div className="stat-value">{pkr(shareTotals.paid)}</div></div>
+        <div className="stat"><div className="stat-label">Share pending</div><div className="stat-value">{pkr(shareTotals.unpaid)}</div></div>
       </div>
 
       <div className="filter-bar">
@@ -122,11 +185,24 @@ export default function Commissions() {
             <p className="muted" style={{ marginTop: 0 }}>
               Overrides the auto-calculated commission for this deal. The change is audit-logged.
             </p>
-            <Field label="Amount (PKR) *">
+            <Field label="Total commission (PKR) *">
               <input className="input" type="number" min="0" value={editAmount} onChange={(e) => setEditAmount(e.target.value)} required />
             </Field>
-            <Field label="Status">
+            <Field label="Owner status">
               <select className="select" value={editStatus} onChange={(e) => setEditStatus(e.target.value)}>
+                <option value="pending">Pending</option>
+                <option value="paid">Paid</option>
+              </select>
+            </Field>
+            <hr className="divider" />
+            <p className="muted" style={{ marginTop: 0 }}>
+              Agent share — the agent&apos;s portion of the owner&apos;s total commission above.
+            </p>
+            <Field label="Agent share amount (PKR)">
+              <input className="input" type="number" min="0" value={editShareAmount} onChange={(e) => setEditShareAmount(e.target.value)} placeholder="Leave empty to keep the current share" />
+            </Field>
+            <Field label="Agent share status">
+              <select className="select" value={editShareStatus} onChange={(e) => setEditShareStatus(e.target.value)}>
                 <option value="pending">Pending</option>
                 <option value="paid">Paid</option>
               </select>
@@ -145,22 +221,38 @@ export default function Commissions() {
         <div className="table-wrap">
           <table className="table">
             <thead>
-              <tr><th>Agent</th><th>Deal</th><th>Property</th><th>Date</th><th className="num">Amount</th><th>Status</th><th></th></tr>
+              <tr>
+                <th>Agent</th><th>Deal</th><th>Property</th><th>Date</th>
+                {showOwner && <th className="num">Total commission</th>}
+                <th className="num">Agent share</th>
+                {showOwner && <th>Owner status</th>}
+                <th>Share status</th>
+                {showOwner && <th>Paid at</th>}
+                <th>Share paid at</th>
+                <th></th>
+              </tr>
             </thead>
             <tbody>
               {rows.map((r) => {
                 const st = String(r.status || 'pending').toLowerCase();
+                const shareSt = String(r.agentStatus || 'pending').toLowerCase();
                 return (
                   <tr key={r.id}>
                     <td>{r.agentName || r.agent?.name || r.agent?.username || `#${String(r.agentId || '').slice(0, 8)}`}</td>
                     <td>{r.dealId ? <Link to={`/deals/${r.dealId}`}>#{String(r.dealId).slice(0, 8)}</Link> : '—'}</td>
                     <td className="muted">{r.propertyCode || '—'}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{fmtDate(r.createdAt || r.created_at)}</td>
-                    <td className="num">
-                      <strong>{pkr(r.amount)}</strong>
-                      {r.manual ? <div className="muted" style={{ fontSize: 12 }}>Manual</div> : null}
-                    </td>
-                    <td><Badge status={st} /></td>
+                    {showOwner && (
+                      <td className="num">
+                        <strong>{pkr(r.amount)}</strong>
+                        {r.manual ? <div className="muted" style={{ fontSize: 12 }}>Manual</div> : null}
+                      </td>
+                    )}
+                    <td className="num"><strong>{pkr(r.agentAmount ?? 0)}</strong></td>
+                    {showOwner && <td><Badge status={st} /></td>}
+                    <td><Badge status={shareSt} /></td>
+                    {showOwner && <td className="muted" style={{ whiteSpace: 'nowrap' }}>{r.paidAt || r.paid_at ? fmtDateTime(r.paidAt || r.paid_at) : '—'}</td>}
+                    <td className="muted" style={{ whiteSpace: 'nowrap' }}>{r.agentPaidAt || r.agent_paid_at ? fmtDateTime(r.agentPaidAt || r.agent_paid_at) : '—'}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 6 }}>
                         {isAdmin && (
@@ -169,6 +261,11 @@ export default function Commissions() {
                         {isAdmin && st !== 'paid' && (
                           <button className="btn btn-primary btn-sm" disabled={paying === r.id} onClick={() => markPaid(r)}>
                             {paying === r.id ? 'Marking…' : 'Mark paid'}
+                          </button>
+                        )}
+                        {isAdmin && shareSt !== 'paid' && (Number(r.agentAmount) || 0) > 0 && (
+                          <button className="btn btn-secondary btn-sm" disabled={payingShare === r.id} onClick={() => markSharePaid(r)}>
+                            {payingShare === r.id ? 'Marking…' : 'Mark share paid'}
                           </button>
                         )}
                       </div>

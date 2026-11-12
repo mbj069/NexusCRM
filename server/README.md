@@ -56,9 +56,11 @@ never hardcode them.
 
 - **admin** — everything: users, AI config, WhatsApp config, audit log, all CRM data.
 - **manager** — all CRM/inventory/deals/payments/documents CRUD, audit log,
-  commission payouts. No user management, AI config, or WhatsApp config.
+  commissions view-only, expenses read-only. No user management, AI config,
+  WhatsApp config, commission payouts, or expense writes.
 - **agent** — same CRM CRUD as manager; commissions list is scoped to the
-  agent's own rows; no audit log, no commission payouts.
+  agent's own rows and shows only their share figures (no owner totals);
+  no audit log, no commission payouts, no expenses.
 
 ## API overview
 
@@ -98,8 +100,14 @@ All routes are under `/api` and require a `Bearer` token except
 | `GET /api/receipts/:paymentId`             | Receipt JSON                                        |
 | `GET /api/receipts/:paymentId/html`        | Printable HTML receipt                              |
 | `GET /api/ledgers/:contactId`              | Client ledger: plans, schedule, totals              |
-| `GET /api/commissions`                     | Commissions (`?agentId=&status=&from=&to=`; agents see own) |
-| `POST /api/commissions/:id/pay`            | Mark commission paid (manager/admin)                |
+| `GET /api/commissions`                     | Commissions (`?agentId=&status=&from=&to=`; agents see own rows and only their share figures — owner `summary` omitted, `agentSummary` only) |
+| `PUT /api/commissions/:id`                 | Manual override (admin): owner `amount`/`status`, and/or agent `agentAmount`/`agentStatus` |
+| `POST /api/commissions/:id/pay`            | Mark the OWNER's commission received (admin; agent share untouched) |
+| `POST /api/commissions/:id/pay-agent-share`| Mark only the agent share paid (admin; owner total untouched) |
+| `GET /api/expenses?category=&from=&to=`    | List expenses + `{ total, byCategory }` (admin/manager) |
+| `POST /api/expenses`                       | Record an expense (admin)                  |
+| `GET /api/expenses/:id`                    | Expense detail (admin/manager)             |
+| `PUT/DELETE /api/expenses/:id`             | Update / delete expense (admin)            |
 | `GET/POST /api/documents`                  | List (`?entityType=&entityId=`) / upload (multipart) |
 | `GET /api/documents/:id/download`          | Download file                                       |
 | `DELETE /api/documents/:id`                | Delete document                                     |
@@ -110,13 +118,34 @@ All routes are under `/api` and require a `Bearer` token except
 | `GET/POST /api/webhooks/whatsapp`          | Meta verification handshake + inbound events        |
 | `GET/PUT /api/whatsapp/config`             | WhatsApp Cloud API config (admin; token never returned) |
 | `POST /api/whatsapp/send-test`             | Real send when configured, honest dry-run otherwise (admin) |
-| `GET /api/dashboard`                       | Revenue, pipeline, inventory, overdue, agents, activity |
+| `GET /api/dashboard`                       | Commission totals + active leads + 6-month trend, pipeline, inventory — scoped per role (admin: owner money; manager: counts only; agent: own share only) |
 | `GET /api/notifications`                   | Own + broadcast notifications                       |
 | `POST /api/notifications/:id/read`         | Mark read                                           |
 | `POST /api/notifications/scan-overdue`     | Create broadcast notifications for overdue installments |
 | `GET /api/audit`                           | Audit log (`?limit=&entityType=&entityId=&action=`, admin/manager) |
 
 ### Notes
+
+- **Commissions: owner vs agent share.** Every commission row tracks two
+  independent amounts. `amount` + `status`/`paid_at` is the OWNER's total
+  commission and whether the owner has received it; `agentAmount` +
+  `agentStatus`/`agentPaidAt` is the agent's share of that total and
+  whether the owner has paid it to the agent. Marking the owner paid
+  (`POST /:id/pay`) never touches the share, and paying the share
+  (`POST /:id/pay-agent-share`) never touches the owner total. Deal
+  creation accepts `agentShareAmount` (wins) or `agentSharePercent`
+  (server computes the amount from the total; only the amount is stored).
+  Term edits (`PUT /api/deals/:id`) never touch the share — only the
+  commission endpoints change it. Agents see only their own share figures
+  (`agentSummary`); the owner `summary` is omitted for them entirely.
+- **Leads are people looking to buy or rent.** `intent` is `buy` or
+  `rent` only — `sell` is rejected (400). Old `sell` rows from before
+  v1.3 stay in the database and remain readable under "All".
+- **Expenses.** Office running costs (rent, utilities, marketing,
+  salaries…). Reads need `view_expenses` (admin + manager); writes need
+  `manage_expenses` (admin only); agents get 403 on every expenses
+  endpoint. `recorded_by` is the creating user; creates/updates/deletes
+  are audit-logged (`EXPENSE_CREATE` / `EXPENSE_UPDATE` / `EXPENSE_DELETE`).
 
 - Deal creation runs in a write transaction (`withTransaction`, i.e.
   `BEGIN IMMEDIATE` … `COMMIT` in libSQL): the property row is

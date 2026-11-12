@@ -8,6 +8,12 @@
 // changes — except the Bilal-vs-Omar inequality, which the seed data
 // guarantees (Bilal has two pending sale commissions, Omar one pending
 // rental commission).
+//
+// v1.3 updates: §3 dashboard checks now expect the v1.3 shapes (admin
+// owner totals + paidCommission + activeLeads + trend; manager counts +
+// trend counts; agent own SHARE figures myTotalShare/myPendingShare/
+// myPaidShare computed from agent_amount/agent_status). commissionTotals,
+// agentPerformance, myCommissions and myTotalCommission are gone.
 const BASE = 'http://localhost:4000';
 let passed = 0, failed = 0;
 const failures = [];
@@ -73,46 +79,69 @@ if (seedRentalDeal) {
     d4plan?.json?.tokenAmount === 20000 && d4plan?.json?.finalAmount === 25000, JSON.stringify(d4plan?.json));
 }
 
-console.log('== 3. Dashboard — commissions first (seed state, before test deals) ==');
+console.log('== 3. Dashboard — commissions first (v1.3 shapes, seed state, before test deals) ==');
 const adminDash = await get('/api/dashboard', adminTok);
 check('admin totalCommission is a number', typeof adminDash.json?.totalCommission === 'number', JSON.stringify(adminDash.json?.totalCommission));
 check('admin pendingCommission is a number', typeof adminDash.json?.pendingCommission === 'number', JSON.stringify(adminDash.json?.pendingCommission));
-check('admin totalCommission = commissionTotals pending+paid',
-  adminDash.json?.totalCommission === (adminDash.json?.commissionTotals?.pending || 0) + (adminDash.json?.commissionTotals?.paid || 0),
-  JSON.stringify(adminDash.json?.commissionTotals));
-check('admin still has commissionTotals (v1.1 compat)', adminDash.json?.commissionTotals !== undefined);
+check('admin paidCommission is a number', typeof adminDash.json?.paidCommission === 'number', JSON.stringify(adminDash.json?.paidCommission));
+check('admin totalCommission = pending + paid',
+  adminDash.json?.totalCommission === adminDash.json?.pendingCommission + adminDash.json?.paidCommission,
+  JSON.stringify(adminDash.json));
+check('admin seed totals 356,750 = 225,500 pending + 131,250 paid (owner)',
+  adminDash.json?.totalCommission === 356750 && adminDash.json?.pendingCommission === 225500 && adminDash.json?.paidCommission === 131250,
+  JSON.stringify(adminDash.json));
+check('admin activeLeads is 9 (seed non-terminal leads)',
+  adminDash.json?.activeLeads === 9, JSON.stringify(adminDash.json?.activeLeads));
+for (const f of ['revenue', 'commissionTotals', 'recentActivity', 'agentPerformance', 'followups', 'overdueInstallments', 'overdueCount', 'overdueTotal', 'myCommissions']) {
+  check(`admin has NO ${f}`, adminDash.json?.[f] === undefined, JSON.stringify(adminDash.json?.[f]));
+}
+const thisMonth = new Date().toISOString().slice(0, 7);
+const adminTrendNow = adminDash.json?.commissionTrend?.find((m) => m.month === thisMonth);
+check('admin trend current month = seed owner totals',
+  adminTrendNow?.total === 356750 && adminTrendNow?.pending === 225500 && adminTrendNow?.paid === 131250,
+  JSON.stringify(adminTrendNow));
 const mgrDash = await get('/api/dashboard', managerTok);
 check('manager commissionCounts numbers', typeof mgrDash.json?.commissionCounts?.pending === 'number' && typeof mgrDash.json?.commissionCounts?.paid === 'number', JSON.stringify(mgrDash.json?.commissionCounts));
-for (const f of ['revenue', 'commissionTotals', 'totalCommission', 'pendingCommission', 'myCommissions']) {
+check('manager seed commissionCounts 3 pending, 1 paid',
+  mgrDash.json?.commissionCounts?.pending === 3 && mgrDash.json?.commissionCounts?.paid === 1,
+  JSON.stringify(mgrDash.json?.commissionCounts));
+for (const f of ['revenue', 'commissionTotals', 'totalCommission', 'pendingCommission', 'paidCommission', 'recentActivity', 'agentPerformance', 'followups', 'overdueInstallments', 'overdueCount', 'overdueTotal', 'myCommissions']) {
   check(`manager has NO ${f}`, mgrDash.json?.[f] === undefined, JSON.stringify(mgrDash.json?.[f]));
 }
-check('manager agentPerformance rows have commission counts, no money',
-  Array.isArray(mgrDash.json?.agentPerformance) && mgrDash.json.agentPerformance.length > 0 &&
-  mgrDash.json.agentPerformance.every((a) => typeof a.commissionPendingCount === 'number' && typeof a.commissionPaidCount === 'number' && a.revenue === undefined && a.commissionEarned === undefined),
-  JSON.stringify(mgrDash.json?.agentPerformance));
-const bilalRow = mgrDash.json?.agentPerformance?.find((a) => a.name === 'Bilal Hussain');
-check('manager Bilal row: 2 pending, 0 paid commissions', bilalRow?.commissionPendingCount === 2 && bilalRow?.commissionPaidCount === 0, JSON.stringify(bilalRow));
-const omarRow = mgrDash.json?.agentPerformance?.find((a) => a.name === 'Omar Farooq');
-check('manager Omar row: 1 pending, 0 paid commissions', omarRow?.commissionPendingCount === 1 && omarRow?.commissionPaidCount === 0, JSON.stringify(omarRow));
-// Agent totals, computed live from each agent's own commission rows.
+check('manager activeLeads is 9', mgrDash.json?.activeLeads === 9, JSON.stringify(mgrDash.json?.activeLeads));
+const mgrTrendNow = mgrDash.json?.commissionTrend?.find((m) => m.month === thisMonth);
+check('manager trend current month counts 3 pending, 1 paid',
+  mgrTrendNow?.countPending === 3 && mgrTrendNow?.countPaid === 1, JSON.stringify(mgrTrendNow));
+// Agent share totals, computed live from each agent's own commission rows
+// (agent_amount by agent_status — the v1.3 share figures, not owner totals).
 async function agentExpected(agentTokValue, agentUserId) {
   const rows = await get(`/api/commissions?agentId=${agentUserId}`, adminTok);
   const list = rows.json?.commissions || [];
-  const pending = list.filter((c) => c.status === 'pending').reduce((s, c) => s + c.amount, 0);
-  const paid = list.filter((c) => c.status === 'paid').reduce((s, c) => s + c.amount, 0);
+  const pending = list.filter((c) => c.agentStatus === 'pending').reduce((s, c) => s + (c.agentAmount || 0), 0);
+  const paid = list.filter((c) => c.agentStatus === 'paid').reduce((s, c) => s + (c.agentAmount || 0), 0);
   return { pending, paid, total: pending + paid };
 }
 const bilalDash = await get('/api/dashboard', agentTok);
 const bilalExp = await agentExpected(agentTok, agentId);
-check('Bilal myTotalCommission matches own rows', bilalDash.json?.myTotalCommission === bilalExp.total, `dash=${bilalDash.json?.myTotalCommission} rows=${bilalExp.total}`);
-check('Bilal myPendingCommission matches own rows', bilalDash.json?.myPendingCommission === bilalExp.pending, `dash=${bilalDash.json?.myPendingCommission} rows=${bilalExp.pending}`);
-check('Bilal still has myCommissions (v1.1 compat)', bilalDash.json?.myCommissions !== undefined);
+check('Bilal myTotalShare matches own share rows', bilalDash.json?.myTotalShare === bilalExp.total, `dash=${bilalDash.json?.myTotalShare} rows=${bilalExp.total}`);
+check('Bilal myPendingShare matches own share rows', bilalDash.json?.myPendingShare === bilalExp.pending, `dash=${bilalDash.json?.myPendingShare} rows=${bilalExp.pending}`);
+check('Bilal myPaidShare matches own share rows', bilalDash.json?.myPaidShare === bilalExp.paid, `dash=${bilalDash.json?.myPaidShare} rows=${bilalExp.paid}`);
+check('Bilal seed share 40,000 = 15,000 pending + 25,000 paid',
+  bilalDash.json?.myTotalShare === 40000 && bilalDash.json?.myPendingShare === 15000 && bilalDash.json?.myPaidShare === 25000,
+  JSON.stringify(bilalDash.json));
+for (const f of ['myCommissions', 'myTotalCommission', 'myPendingCommission', 'totalCommission', 'pendingCommission', 'paidCommission', 'commissionTotals', 'revenue', 'summary']) {
+  check(`Bilal dashboard has NO ${f}`, bilalDash.json?.[f] === undefined, JSON.stringify(bilalDash.json?.[f]));
+}
 const omarDash = await get('/api/dashboard', omarTok);
 const omarExp = await agentExpected(omarTok, omarId);
-check('Omar myTotalCommission matches own rows', omarDash.json?.myTotalCommission === omarExp.total, `dash=${omarDash.json?.myTotalCommission} rows=${omarExp.total}`);
-check('Omar myPendingCommission matches own rows', omarDash.json?.myPendingCommission === omarExp.pending, `dash=${omarDash.json?.myPendingCommission} rows=${omarExp.pending}`);
-check('Bilal vs Omar totals differ', bilalDash.json?.myTotalCommission !== omarDash.json?.myTotalCommission,
-  `bilal=${bilalDash.json?.myTotalCommission} omar=${omarDash.json?.myTotalCommission}`);
+check('Omar myTotalShare matches own share rows', omarDash.json?.myTotalShare === omarExp.total, `dash=${omarDash.json?.myTotalShare} rows=${omarExp.total}`);
+check('Omar myPendingShare matches own share rows', omarDash.json?.myPendingShare === omarExp.pending, `dash=${omarDash.json?.myPendingShare} rows=${omarExp.pending}`);
+check('Omar myPaidShare matches own share rows', omarDash.json?.myPaidShare === omarExp.paid, `dash=${omarDash.json?.myPaidShare} rows=${omarExp.paid}`);
+check('Omar seed share 5,000 pending, 0 paid',
+  omarDash.json?.myTotalShare === 5000 && omarDash.json?.myPendingShare === 5000 && omarDash.json?.myPaidShare === 0,
+  JSON.stringify(omarDash.json));
+check('Bilal vs Omar share totals differ', bilalDash.json?.myTotalShare !== omarDash.json?.myTotalShare,
+  `bilal=${bilalDash.json?.myTotalShare} omar=${omarDash.json?.myTotalShare}`);
 
 console.log('== 4. Rent listing create + validation ==');
 const noRent = await post('/api/properties', adminTok, { code: 'TST-RNT-000', type: 'house', title: 'No rent', location: 'Test', areaValue: 5, areaUnit: 'marla', listingType: 'rent' });

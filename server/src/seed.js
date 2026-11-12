@@ -10,6 +10,12 @@
 // v1.2 adds rentals: RENT intent, For Rent listings with rent per month,
 // a rental deal whose value is the first month's rent with a half-month
 // manual commission, and a two-stage rental plan (advance → final).
+//
+// v1.3: leads are people looking to buy or rent only — no sell leads (the
+// three old sell leads became buy/rent). Commissions now carry an agent
+// share beside the owner total (D1 78,000 / share 15,000; D2 125,000 /
+// share 25,000 paid; D3 owner paid, share 20,000 still pending; D4 rental
+// 22,500 / share 5,000), plus a few office expenses.
 
 import 'dotenv/config';
 import bcrypt from 'bcryptjs';
@@ -25,7 +31,7 @@ try {
   await withTransaction(async (tx) => {
     // --- Wipe (child tables first) -------------------------------------------
     for (const t of ['payments', 'payment_schedule', 'payment_plans', 'commissions',
-      'deals', 'activities', 'followups', 'documents', 'notifications',
+      'deals', 'activities', 'followups', 'documents', 'notifications', 'expenses',
       'leads', 'contacts', 'properties', 'users', 'counters', 'audit_log']) {
       await tx.prepare(`DELETE FROM ${t}`).run();
     }
@@ -105,13 +111,13 @@ try {
       [C['Ahmed Raza'], 'Ahmed Raza', '+923001234567', '+923001234567', 'referral', '5 marla plot in Wadi-e-Sitara', 'buy', 'Wadi-e-Sitara', 2500000, 3200000, 'negotiating', 65, agentId, agentId, 'Negotiating payment terms.'],
       [C['Fatima Khan'], 'Fatima Khan', '+923219876543', '', 'website', '10 marla house near University Road', 'buy', 'Gulberg City', 16000000, 19000000, 'viewing', 50, managerId, agent2Id, 'Second site visit done.'],
       [null, 'Danish Ali', '+923001112223', '+923001112223', 'WhatsApp', 'Shop on Faisalabad Road', 'buy', 'Model City', 10000000, 13000000, 'new', 30, agentId, agent2Id, 'Inbound WhatsApp inquiry.'],
-      [C['Ayesha Malik'], 'Ayesha Malik', '+923457788990', '+923457788990', 'WhatsApp', '5 marla plot', 'sell', 'Satellite Town', 2800000, 3500000, 'contacted', 40, agentId, agentId, 'Wants to sell her plot, shared options.'],
+      [C['Ayesha Malik'], 'Ayesha Malik', '+923457788990', '+923457788990', 'WhatsApp', '5 marla house on rent', 'rent', 'Satellite Town', 25000, 40000, 'contacted', 40, agentId, agentId, 'Looking for a 5 marla house on rent, shared options.'],
       [C['Imran Sheikh'], 'Imran Sheikh', '+923007766554', '', 'social', 'Commercial plaza investment', 'buy', 'Gulberg City', 30000000, 40000000, 'new', 10, managerId, null, 'Waiting on investment deck. Unassigned — manager assigns.'],
       [C['Kashif Mehmood'], 'Kashif Mehmood', '+923339988776', '+923339988776', 'manual', '1 kanal plot in Gulberg City', 'buy', 'Gulberg City', 13000000, 15000000, 'viewing', 50, agentId, agentId, 'Liked PLT-003.'],
       [C['Nadia Akram'], 'Nadia Akram', '+923115544332', '', 'website', '3 marla house', 'buy', 'Model City', 6500000, 7500000, 'contacted', 30, agentId, agent2Id, 'Sent HSE-004 details.'],
       [C['Tariq Aziz'], 'Tariq Aziz', '+923008877665', '+923008877665', 'WhatsApp', '10 marla plot in Model City', 'buy', 'Model City', 6000000, 7000000, 'won', 75, managerId, agentId, 'Deal closed, plan active.'],
-      [null, 'Farhan Iqbal', '+923004445556', '', 'manual', '4 marla plot in Satellite Town', 'sell', 'Satellite Town', 3000000, 3400000, 'lost', 10, agentId, agent2Id, 'Went with another dealer.'],
-      [null, 'Rabia Anwar', '+923215566778', '+923215566778', 'referral', '5 marla house in Satellite Town', 'sell', 'Satellite Town', 9000000, 10000000, 'new', 35, managerId, agentId, 'Referred by Hina Aslam. Wants to sell.'],
+      [null, 'Farhan Iqbal', '+923004445556', '', 'manual', '4 marla plot in Satellite Town', 'buy', 'Satellite Town', 3000000, 3400000, 'lost', 10, agentId, agent2Id, 'Went with another dealer.'],
+      [null, 'Rabia Anwar', '+923215566778', '+923215566778', 'referral', '5 marla house on rent', 'rent', 'Satellite Town', 35000, 55000, 'new', 35, managerId, agentId, 'Referred by Hina Aslam. Looking to rent.'],
       [C['Zahid Mahmood'], 'Zahid Mahmood', '+923006655443', '+923006655443', 'referral', '5 marla house in Model City', 'buy', 'Model City', 8500000, 9000000, 'won', 80, managerId, agentId, 'Deal closed Oct 2026.'],
       [C['Bilal Ahmed'], 'Bilal Ahmed', '+923001234568', '+923001234568', 'website', '5 marla house on rent', 'rent', 'Satellite Town', 30000, 50000, 'viewing', 40, agent2Id, agent2Id, 'Wants a 5 marla house on rent in Satellite Town.'],
     ];
@@ -154,17 +160,23 @@ try {
     // bayana 0, commission is a fixed half-month manual amount (22,500).
     await insDeal.run(D4, L['Bilal Ahmed'], P['RNT-HSE-001'], agent2Id, 'in_progress', 45000, 0, 'fixed', 22500, 'Rental — first month rent, advance received.', '2026-11-01 10:00:00');
 
-    // --- Commissions ------------------------------------------------------------------
-    // D2's commission is the manual-override example: the auto fixed amount
-    // was 100,000; the admin set 125,000 manually (manual=1).
-    // D4's commission is the rental manual example: half a month's rent
-    // (22,500), set at deal creation (manual=1).
-    const insComm = tx.prepare(`INSERT INTO commissions (id, deal_id, agent_id, amount, status, paid_at, manual)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`);
-    await insComm.run(uid(), D1, agentId, 78000, 'pending', null, 0);
-    await insComm.run(uid(), D2, agentId, 125000, 'pending', null, 1);
-    await insComm.run(uid(), D3, managerId, 131250, 'paid', '2026-10-05T10:00:00.000Z', 0);
-    await insComm.run(uid(), D4, agent2Id, 22500, 'pending', null, 1);
+    // --- Commissions (owner total vs agent share) -------------------------------
+    // D1: total 78,000, agent share 15,000 — both pending.
+    // D2: manual-override example — auto fixed was 100,000; admin set
+    // 125,000 manually (manual=1); agent share 25,000 already PAID while
+    // the owner total is still pending (the two statuses are independent).
+    // D3: owner total 131,250 PAID, but the agent share 20,000 is still
+    // pending — owner-received does not mean agent-paid.
+    // D4: rental manual example — half a month's rent (22,500), set at deal
+    // creation (manual=1); agent share 5,000 pending.
+    // Owner totals are unchanged from v1.2: pending 225,500, paid 131,250.
+    const insComm = tx.prepare(`INSERT INTO commissions (id, deal_id, agent_id, amount, status, paid_at, manual,
+        agent_amount, agent_status, agent_paid_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    await insComm.run(uid(), D1, agentId, 78000, 'pending', null, 0, 15000, 'pending', null);
+    await insComm.run(uid(), D2, agentId, 125000, 'pending', null, 1, 25000, 'paid', '2026-10-06T10:00:00.000Z');
+    await insComm.run(uid(), D3, managerId, 131250, 'paid', '2026-10-05T10:00:00.000Z', 0, 20000, 'pending', null);
+    await insComm.run(uid(), D4, agent2Id, 22500, 'pending', null, 1, 5000, 'pending', null);
 
     // --- Payment plans + schedules (Token → Bayana → Installments → Final) ---------
     const insPlan = tx.prepare(`INSERT INTO payment_plans
@@ -227,6 +239,15 @@ try {
 
     await tx.prepare('INSERT INTO counters (name, next) VALUES (?, ?)').run('receipt_2026', 9);
 
+    // --- Expenses (office running costs) ----------------------------------------
+    const insExp = tx.prepare(`INSERT INTO expenses (id, date, category, description, amount, recorded_by)
+      VALUES (?, ?, ?, ?, ?, ?)`);
+    await insExp.run(uid(), '2026-11-01', 'Office Rent', 'November office rent, Kachehri Road.', 120000, adminId);
+    await insExp.run(uid(), '2026-11-01', 'Salaries', 'November staff salaries.', 250000, adminId);
+    await insExp.run(uid(), '2026-11-03', 'Utilities', 'Electricity + water bills.', 18500, managerId);
+    await insExp.run(uid(), '2026-11-05', 'Marketing', 'Facebook ads for rental listings.', 45000, managerId);
+    await insExp.run(uid(), '2026-11-07', 'Office Supplies', 'Stationery and printing.', 8500, managerId);
+
     // --- Notifications ------------------------------------------------------------------
     const insNotif = tx.prepare(`INSERT INTO notifications (id, user_id, kind, title, body, link, is_read)
       VALUES (?, ?, ?, ?, ?, ?, ?)`);
@@ -236,7 +257,7 @@ try {
       'Seed data loaded for Trust Property Real Estate Agency.', '', 1);
 
   });
-  console.log('Seed complete: 4 users, 15 properties, 14 contacts, 12 leads, 4 deals, 3 plans, 8 payments.');
+  console.log('Seed complete: 4 users, 15 properties, 14 contacts, 12 leads, 4 deals, 3 plans, 8 payments, 5 expenses.');
 } catch (e) {
   console.error('Seed failed:', e);
   process.exit(1);

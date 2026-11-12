@@ -1,6 +1,13 @@
 // NexusCRM v1.1 verification suite — runs against a local server on the
 // file DB (http://localhost:4000). Covers the v1.0 regression set plus every
 // v1.1 item. Exits non-zero if any check fails.
+//
+// v1.3 updates: §3 sell-lead checks now expect 400 (leads are buy/rent
+// only; a second buy lead replaces the old sell lead downstream), and §11
+// dashboard checks now expect the v1.3 shapes (owner totals + activeLeads
+// + commissionTrend for admin, counts for manager, own share for agent;
+// revenue / commissionTotals / recentActivity / agentPerformance /
+// followups / overdue / myCommissions removed).
 const BASE = 'http://localhost:4000';
 let passed = 0, failed = 0;
 const failures = [];
@@ -77,12 +84,19 @@ const sellLead = await post('/api/leads', adminTok, {
   name: 'Verify Seller', phone: '+923000000002', source: 'manual',
   interest: 'selling plot', intent: 'sell', society: 'Gulberg City',
 });
-check('sell lead create 201', sellLead.status === 201 && sellLead.json?.intent === 'sell');
-const sellLeadId = sellLead.json?.id;
+check('sell lead create 400 (v1.3: leads are buy/rent only)', sellLead.status === 400, JSON.stringify(sellLead.json));
+// Second buy lead, used where the old sell lead was used downstream
+// (manager-deal 403 test, unassigned-lead 403 test, delete-blocked test).
+const secondLead = await post('/api/leads', adminTok, {
+  name: 'Verify Second Buyer', phone: '+923000000004', source: 'manual',
+  interest: '10 marla plot', intent: 'buy', society: 'Model City',
+});
+check('second buy lead create 201', secondLead.status === 201 && secondLead.json?.intent === 'buy');
+const secondLeadId = secondLead.json?.id;
 const buyFilter = await get('/api/leads?intent=buy', adminTok);
 check('intent=buy returns only buy', Array.isArray(buyFilter.json) && buyFilter.json.length > 0 && buyFilter.json.every((l) => l.intent === 'buy'), `n=${buyFilter.json?.length}`);
 const sellFilter = await get('/api/leads?intent=sell', adminTok);
-check('intent=sell returns only sell', Array.isArray(sellFilter.json) && sellFilter.json.length > 0 && sellFilter.json.every((l) => l.intent === 'sell'), `n=${sellFilter.json?.length}`);
+check('intent=sell rejected 400 (v1.3: buy/rent only)', sellFilter.status === 400, `got ${sellFilter.status}`);
 const socFilter = await get('/api/leads?society=Model%20City', adminTok);
 check('society filter returns only Model City', Array.isArray(socFilter.json) && socFilter.json.length > 0 && socFilter.json.every((l) => l.society === 'Model City'), `n=${socFilter.json?.length}`);
 const comboFilter = await get('/api/leads?intent=buy&society=Model%20City', adminTok);
@@ -100,14 +114,14 @@ const unassignedId = unassigned.json?.id;
 check('unassigned lead created', unassigned.status === 201 && (unassigned.json?.assignedTo === null || unassigned.json?.assigned_to === null));
 const agentLeadsBefore = await get('/api/leads', agentTok);
 check('agent list excludes unassigned lead', Array.isArray(agentLeadsBefore.json) && !agentLeadsBefore.json.some((l) => l.id === unassignedId), `n=${agentLeadsBefore.json?.length}`);
-check('agent list excludes unassigned (sell lead too)', !agentLeadsBefore.json.some((l) => l.id === sellLeadId));
+check('agent list excludes unassigned (second lead too)', !agentLeadsBefore.json.some((l) => l.id === secondLeadId));
 const assign = await post(`/api/leads/${unassignedId}/assign`, managerTok, { agentId });
 check('manager assigns lead to agent', assign.status === 200 && assign.json?.assignedTo === agentId, JSON.stringify(assign.json));
 const agentLeadsAfter = await get('/api/leads', agentTok);
 check('agent list now includes assigned lead', agentLeadsAfter.json.some((l) => l.id === unassignedId));
 const agentCantAssign = await post(`/api/leads/${leadId}/assign`, agentTok, { agentId });
 check('agent cannot assign (403)', agentCantAssign.status === 403);
-const agentGetUnassigned = await get(`/api/leads/${sellLeadId}`, agentTok);
+const agentGetUnassigned = await get(`/api/leads/${secondLeadId}`, agentTok);
 check('agent 403 on unassigned lead detail', agentGetUnassigned.status === 403);
 const agentGetOwn = await get(`/api/leads/${unassignedId}`, agentTok);
 check('agent 200 on own lead detail', agentGetOwn.status === 200 && agentGetOwn.json?.assignedAgent?.name, JSON.stringify(agentGetOwn.json?.assignedAgent));
@@ -133,7 +147,7 @@ const agentDeal403 = await get(`/api/deals/${dealId}`, managerTok); // manager c
 check('manager can see deal (200)', agentDeal403.status === 200);
 // Another agent's deal: create a deal as manager (agent_id=manager) then agent tries
 const mgrDeal = await post('/api/deals', managerTok, {
-  leadId: sellLeadId, propertyId: (await get('/api/properties?status=Available', adminTok)).json?.[0]?.id,
+  leadId: secondLeadId, propertyId: (await get('/api/properties?status=Available', adminTok)).json?.[0]?.id,
   dealValue: 1000000, bayanaAmount: 0, commissionType: 'fixed', commissionValue: 10000, agentId: managerId,
 });
 const mgrDealId = mgrDeal.json?.id;
@@ -162,7 +176,7 @@ if (planCreate.status === 201) {
 }
 // Zero-installment plan on the manager deal
 if (mgrDealId) {
-  const contactForMgr = (await get(`/api/leads/${sellLeadId}`, adminTok)).json?.contactId;
+  const contactForMgr = (await get(`/api/leads/${secondLeadId}`, adminTok)).json?.contactId;
   let cId = contactForMgr;
   if (!cId) {
     const c = await post('/api/contacts', adminTok, { name: 'Plan Payer', phone: '+923000000099', type: 'buyer' });
@@ -255,22 +269,49 @@ console.log('== 10. Uploads ==');
   }
 }
 
-console.log('== 11. Dashboards ==');
+console.log('== 11. Dashboards (v1.3 shapes) ==');
 const adminDash = await get('/api/dashboard', adminTok);
-check('admin dashboard has revenue', adminDash.status === 200 && adminDash.json?.revenue?.collected !== undefined && adminDash.json?.revenue?.expected !== undefined, JSON.stringify(Object.keys(adminDash.json || {})));
-check('admin dashboard has commissionTotals', adminDash.json?.commissionTotals !== undefined);
-check('admin dashboard has recentActivity', Array.isArray(adminDash.json?.recentActivity));
-check('admin agentPerformance has money', Array.isArray(adminDash.json?.agentPerformance) && adminDash.json.agentPerformance.every((a) => a.revenue !== undefined));
+check('admin dashboard has total/pending/paid commission (owner)',
+  adminDash.status === 200 && typeof adminDash.json?.totalCommission === 'number'
+  && typeof adminDash.json?.pendingCommission === 'number' && typeof adminDash.json?.paidCommission === 'number',
+  JSON.stringify(Object.keys(adminDash.json || {})));
+check('admin total = pending + paid',
+  adminDash.json?.totalCommission === adminDash.json?.pendingCommission + adminDash.json?.paidCommission);
+check('admin dashboard has activeLeads count', typeof adminDash.json?.activeLeads === 'number', JSON.stringify(adminDash.json?.activeLeads));
+check('admin commissionTrend is 6 months of owner {total,pending,paid}',
+  Array.isArray(adminDash.json?.commissionTrend) && adminDash.json.commissionTrend.length === 6
+  && adminDash.json.commissionTrend.every((m) => /^\d{4}-\d{2}$/.test(m.month) && typeof m.total === 'number' && typeof m.pending === 'number' && typeof m.paid === 'number'),
+  JSON.stringify(adminDash.json?.commissionTrend));
+for (const f of ['revenue', 'commissionTotals', 'recentActivity', 'agentPerformance', 'followups', 'overdueInstallments', 'overdueCount', 'overdueTotal', 'myCommissions', 'myTotalCommission']) {
+  check(`admin dashboard has NO ${f}`, adminDash.json?.[f] === undefined, JSON.stringify(adminDash.json?.[f]));
+}
 const mgrDash = await get('/api/dashboard', managerTok);
 check('manager dashboard has NO revenue', mgrDash.status === 200 && mgrDash.json?.revenue === undefined, JSON.stringify(Object.keys(mgrDash.json || {})));
-check('manager dashboard has NO commissionTotals', mgrDash.json?.commissionTotals === undefined);
-check('manager dashboard has NO recentActivity', mgrDash.json?.recentActivity === undefined);
-check('manager agentPerformance has NO money', Array.isArray(mgrDash.json?.agentPerformance) && mgrDash.json.agentPerformance.every((a) => a.revenue === undefined && a.commissionEarned === undefined));
+for (const f of ['commissionTotals', 'totalCommission', 'pendingCommission', 'paidCommission', 'recentActivity', 'agentPerformance', 'followups', 'overdueInstallments', 'overdueCount', 'overdueTotal', 'myCommissions']) {
+  check(`manager dashboard has NO ${f}`, mgrDash.json?.[f] === undefined, JSON.stringify(mgrDash.json?.[f]));
+}
+check('manager dashboard has commissionCounts (counts only)', typeof mgrDash.json?.commissionCounts?.pending === 'number' && typeof mgrDash.json?.commissionCounts?.paid === 'number', JSON.stringify(mgrDash.json?.commissionCounts));
+check('manager commissionTrend is 6 months of counts {countPending,countPaid}',
+  Array.isArray(mgrDash.json?.commissionTrend) && mgrDash.json.commissionTrend.length === 6
+  && mgrDash.json.commissionTrend.every((m) => typeof m.countPending === 'number' && typeof m.countPaid === 'number' && m.total === undefined),
+  JSON.stringify(mgrDash.json?.commissionTrend));
 check('manager dashboard has leads/deals by stage', mgrDash.json?.leadsByStage !== undefined && mgrDash.json?.dealsByStage !== undefined);
+check('manager dashboard has activeLeads count', typeof mgrDash.json?.activeLeads === 'number');
 const agentDash = await get('/api/dashboard', agentTok);
 check('agent dashboard has NO revenue', agentDash.json?.revenue === undefined);
 check('agent dashboard has NO agentPerformance', agentDash.json?.agentPerformance === undefined);
-check('agent dashboard has myCommissions', agentDash.json?.myCommissions !== undefined, JSON.stringify(Object.keys(agentDash.json || {})));
+for (const f of ['myCommissions', 'myTotalCommission', 'myPendingCommission', 'myDeals', 'totalCommission', 'pendingCommission', 'paidCommission', 'commissionTotals', 'recentActivity', 'followups', 'overdueTotal']) {
+  check(`agent dashboard has NO ${f}`, agentDash.json?.[f] === undefined, JSON.stringify(agentDash.json?.[f]));
+}
+check('agent dashboard has own share figures myTotal/myPending/myPaidShare',
+  typeof agentDash.json?.myTotalShare === 'number' && typeof agentDash.json?.myPendingShare === 'number' && typeof agentDash.json?.myPaidShare === 'number'
+  && agentDash.json.myTotalShare === agentDash.json.myPendingShare + agentDash.json.myPaidShare,
+  JSON.stringify(Object.keys(agentDash.json || {})));
+check('agent dashboard has myActiveLeads count', typeof agentDash.json?.myActiveLeads === 'number');
+check('agent commissionTrend is 6 months of own share {total,pending,paid}',
+  Array.isArray(agentDash.json?.commissionTrend) && agentDash.json.commissionTrend.length === 6
+  && agentDash.json.commissionTrend.every((m) => typeof m.total === 'number' && typeof m.pending === 'number' && typeof m.paid === 'number'),
+  JSON.stringify(agentDash.json?.commissionTrend));
 check('agent leadsByStage only own', (() => {
   const total = Object.values(agentDash.json?.leadsByStage || {}).reduce((a, b) => a + b, 0);
   return total === (agentLeadsAfter.json?.length || 0) || total > 0;
@@ -324,8 +365,8 @@ check('property without seller has null seller', noSellerProp.status === 201 && 
 console.log('== 15. Cleanup test data ==');
 const delLead = await del(`/api/leads/${leadId}`, adminTok);
 check('delete lead with deals blocked (409)', delLead.status === 409, `got ${delLead.status}`);
-const delSell = await del(`/api/leads/${sellLeadId}`, adminTok);
-check('delete sell lead blocked by deal (409)', delSell.status === 409, `got ${delSell.status}`);
+const delSell = await del(`/api/leads/${secondLeadId}`, adminTok);
+check('delete second lead blocked by deal (409)', delSell.status === 409, `got ${delSell.status}`);
 const delUnassigned = await del(`/api/leads/${unassignedId}`, adminTok);
 check('delete assigned test lead 200', delUnassigned.status === 200, `got ${delUnassigned.status}: ${JSON.stringify(delUnassigned.json)}`);
 const delProp1 = await del(`/api/properties/${newProp.json?.id}`, adminTok);

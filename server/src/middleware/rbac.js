@@ -8,16 +8,17 @@
 //           lead assignment.
 // manager = team-view dashboard (no money totals), all leads/deals/
 //           payments, lead assignment, inventory, contacts, follow-ups,
-//           commissions view-only. No users, no audit log, no settings.
+//           commissions view-only, expenses read-only. No users, no audit
+//           log, no settings, no expense writes.
 // agent   = own dashboard only, assigned leads only, own deals only, own
 //           commissions only, inventory browse (no totals), contacts
 //           linked to their own leads/deals, own follow-ups. No users, no
 //           audit log, no settings, no unassigned leads, no other agents'
-//           data.
+//           data, no expenses at all.
 
 export const ROLES = {
-  admin: ['manage_users', 'ai_config', 'whatsapp_config', 'view_audit_log', 'pay_commissions', 'assign_commissions', 'assign_leads', 'crm'],
-  manager: ['assign_leads', 'crm'],
+  admin: ['manage_users', 'ai_config', 'whatsapp_config', 'view_audit_log', 'pay_commissions', 'assign_commissions', 'assign_leads', 'manage_expenses', 'view_expenses', 'crm'],
+  manager: ['assign_leads', 'view_expenses', 'crm'],
   agent: ['crm'],
 };
 

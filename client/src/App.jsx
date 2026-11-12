@@ -10,6 +10,7 @@ import { Inventory, PropertyDetail } from './pages/Inventory.jsx';
 import { Deals, DealDetail } from './pages/Deals.jsx';
 import { Payments, PlanDetail, LedgerView } from './pages/Payments.jsx';
 import Commissions from './pages/Commissions.jsx';
+import Expenses from './pages/Expenses.jsx';
 import Followups from './pages/Followups.jsx';
 import Settings from './pages/Settings.jsx';
 
@@ -26,6 +27,14 @@ function RequireAuth({ children }) {
 function SettingsGate({ children }) {
   const { user } = useAuth();
   if (user?.role !== 'admin') return <Navigate to="/" replace />;
+  return children;
+}
+
+// Expenses is admin + manager only (manager read-only). Agents never
+// reach the page. The server enforces this too.
+function ExpensesGate({ children }) {
+  const { user } = useAuth();
+  if (user?.role !== 'admin' && user?.role !== 'manager') return <Navigate to="/" replace />;
   return children;
 }
 
@@ -53,6 +62,14 @@ export default function App() {
         <Route path="payments/plans/:id" element={<PlanDetail />} />
         <Route path="payments/ledgers/:contactId" element={<LedgerView />} />
         <Route path="commissions" element={<Commissions />} />
+        <Route
+          path="expenses"
+          element={
+            <ExpensesGate>
+              <Expenses />
+            </ExpensesGate>
+          }
+        />
         <Route path="followups" element={<Followups />} />
         <Route
           path="settings"

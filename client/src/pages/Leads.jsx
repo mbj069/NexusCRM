@@ -12,11 +12,17 @@ const LEAD_STAGES = ['new', 'contacted', 'viewing', 'negotiating', 'won', 'lost'
 const ACTIVITY_KINDS = ['note', 'call', 'viewing', 'message'];
 const KIND_ICONS = { note: '📝', call: '📞', viewing: '👁️', message: '💬', stage_change: '🔀' };
 
+// Intent is buy | rent only (v1.3). Old 'sell' rows render as Buy.
+const intentLabel = (v) => (v === 'rent' ? 'Rent' : 'Buy');
+const intentBadgeColor = (v) => (v === 'rent' ? 'b-indigo' : 'b-blue');
+
 function LeadForm({ initial, agents = [], canAssign = false, onSaved, onCancel }) {
   const [f, setF] = useState({
     name: '', phone: '', whatsapp: '', intent: 'buy', society: '', source: '',
     notes: '', interest: '', budgetMin: '', budgetMax: '', assignedTo: '',
     ...(initial || {}),
+    // Normalize any legacy 'sell' intent to 'buy' — the form only offers Buy/Rent.
+    intent: initial?.intent === 'rent' ? 'rent' : 'buy',
   });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -50,7 +56,6 @@ function LeadForm({ initial, agents = [], canAssign = false, onSaved, onCancel }
         <Field label="Intent">
           <select className="select" value={f.intent || 'buy'} onChange={set('intent')}>
             <option value="buy">🛒 Buy</option>
-            <option value="sell">🏷️ Sell</option>
             <option value="rent">🏠 Rent</option>
           </select>
         </Field>
@@ -150,11 +155,10 @@ export function Leads() {
             {stageOptions.map((s) => <option key={s} value={s}>{prettyLabel(s)}</option>)}
           </select>
         </Field>
-        <Field label="Buy / Sell / Rent">
+        <Field label="Buy / Rent">
           <select className="select" value={intent} onChange={(e) => { setIntent(e.target.value); load(stage, q, e.target.value, society); }}>
-            <option value="">Buy, Sell &amp; Rent</option>
+            <option value="">Buy &amp; Rent</option>
             <option value="buy">🛒 Buy</option>
-            <option value="sell">🏷️ Sell</option>
             <option value="rent">🏠 Rent</option>
           </select>
         </Field>
@@ -192,7 +196,7 @@ export function Leads() {
                       <WaButton phone={l.whatsapp || l.phone} name={l.name} />
                     </span>
                   </td>
-                  <td><Badge status={l.intent || 'buy'} /></td>
+                  <td><Badge status={intentLabel(l.intent)} color={intentBadgeColor(l.intent)} /></td>
                   <td><Badge status={l.stage} /></td>
                   <td className="muted">{l.society || '—'}</td>
                   <td className="muted">{l.assignedName || 'Unassigned'}</td>
@@ -380,7 +384,7 @@ export function LeadDetail() {
       <BackLink to="/leads" label="Leads" />
       <PageHeader
         title={lead.name}
-        sub={`${lead.intent === 'sell' ? '🏷️ Sell' : lead.intent === 'rent' ? '🏠 Rent' : '🛒 Buy'}${lead.society ? ` · ${lead.society}` : ''} · ${lead.phone || 'no phone'} · Source: ${lead.source || '—'}`}
+        sub={`${lead.intent === 'rent' ? '🏠 Rent' : '🛒 Buy'}${lead.society ? ` · ${lead.society}` : ''} · ${lead.phone || 'no phone'} · Source: ${lead.source || '—'}`}
         actions={
           <>
             <WaButton phone={lead.whatsapp || lead.phone} name={lead.name} className="btn btn-secondary btn-sm" />
@@ -397,7 +401,7 @@ export function LeadDetail() {
           <dl className="kv">
             <dt>Phone</dt><dd>{lead.phone || '—'}</dd>
             <dt>WhatsApp</dt><dd>{lead.whatsapp || lead.phone || '—'}</dd>
-            <dt>Intent</dt><dd><Badge status={lead.intent || 'buy'} /></dd>
+            <dt>Intent</dt><dd><Badge status={intentLabel(lead.intent)} color={intentBadgeColor(lead.intent)} /></dd>
             <dt>Society</dt><dd>{lead.society || '—'}</dd>
             <dt>Interest</dt><dd>{lead.interest || '—'}</dd>
             <dt>Budget</dt><dd>{lead.budgetMin || lead.budgetMax ? `${lead.budgetMin ? pkr(lead.budgetMin) : '—'} – ${lead.budgetMax ? pkr(lead.budgetMax) : '—'}` : '—'}</dd>

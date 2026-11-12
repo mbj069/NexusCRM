@@ -17,6 +17,11 @@ export default function DealModal({ lead, property, onClose }) {
   const [form, setForm] = useState({ dealValue: '', bayanaAmount: '', commissionType: 'percent', commissionValue: '' });
   const [commPick, setCommPick] = useState('');
   const [manualComm, setManualComm] = useState('');
+  // Agent share: the agent's portion of the owner's total commission.
+  // Either a manual amount or a percent of the total commission — never
+  // both at once (typing one clears the other).
+  const [shareAmount, setShareAmount] = useState('');
+  const [sharePercent, setSharePercent] = useState('');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -43,6 +48,25 @@ export default function DealModal({ lead, property, onClose }) {
       }
     })();
   }, []);
+
+  // The owner's total commission, as entered above — the base the agent
+  // share percent is computed from. 0 until the commission is entered.
+  const totalCommission = (() => {
+    if (isRental) {
+      if (manualComm !== '') return Number(manualComm) || 0;
+      if (commPick === 'half') return rentPerMonth / 2;
+      if (commPick === 'full') return rentPerMonth;
+      return 0;
+    }
+    if (form.commissionValue === '') return 0;
+    const v = Number(form.commissionValue) || 0;
+    return form.commissionType === 'percent'
+      ? ((Number(form.dealValue) || 0) * v) / 100
+      : v;
+  })();
+  const shareFromPercent = sharePercent !== '' && totalCommission > 0
+    ? (totalCommission * (Number(sharePercent) || 0)) / 100
+    : null;
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -78,6 +102,20 @@ export default function DealModal({ lead, property, onClose }) {
           payload.commissionType = form.commissionType;
           payload.commissionValue = Number(form.commissionValue);
         }
+      }
+      // Agent share: a typed amount wins and is sent on its own; otherwise
+      // a typed percent is sent and the server computes the amount from
+      // the total commission. A percent needs a total commission to
+      // compute from — otherwise ask for a direct amount.
+      if (shareAmount !== '') {
+        payload.agentShareAmount = Number(shareAmount);
+      } else if (sharePercent !== '') {
+        if (totalCommission <= 0) {
+          setError('Enter the total commission above so a percent share can be calculated — or type the share amount directly.');
+          setSaving(false);
+          return;
+        }
+        payload.agentSharePercent = Number(sharePercent);
       }
       const deal = await post('/api/deals', payload);
       onClose();
@@ -200,6 +238,42 @@ export default function DealModal({ lead, property, onClose }) {
               </div>
             </>
           )}
+
+          {/* Agent share — shown for both sale and rental deals: the
+              agent's portion of the owner's total commission above. */}
+          <hr className="divider" />
+          <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Agent share</h3>
+          <p className="muted" style={{ marginTop: 0 }}>
+            The agent&apos;s portion of the owner&apos;s total commission
+            {totalCommission > 0 ? ` (${pkr(totalCommission)})` : ''} — type an amount, or a percent of it.
+          </p>
+          <div className="form-row">
+            <Field label="Agent share amount (PKR)">
+              <input
+                className="input" type="number" min="0" step="any"
+                value={shareAmount}
+                onChange={(e) => { setShareAmount(e.target.value); if (e.target.value !== '') setSharePercent(''); }}
+                placeholder="e.g. 20000"
+              />
+            </Field>
+            <Field
+              label="% of total commission"
+              hint={
+                shareFromPercent !== null
+                  ? `≈ ${pkr(shareFromPercent)} of ${pkr(totalCommission)} total commission`
+                  : totalCommission > 0
+                    ? 'Share as a percent of the total commission'
+                    : 'Enter the total commission above to preview the share'
+              }
+            >
+              <input
+                className="input" type="number" min="0" max="100" step="any"
+                value={sharePercent}
+                onChange={(e) => { setSharePercent(e.target.value); if (e.target.value !== '') setShareAmount(''); }}
+                placeholder="e.g. 25"
+              />
+            </Field>
+          </div>
 
           <Field label="Notes">
             <textarea className="textarea" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything the agent should know…" />

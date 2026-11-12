@@ -177,7 +177,7 @@ export async function initSchema() {
       source TEXT NOT NULL DEFAULT 'manual'
         CHECK (source IN ('website','WhatsApp','social','manual','referral')),
       interest TEXT NOT NULL DEFAULT '',
-      intent TEXT NOT NULL DEFAULT 'buy' CHECK (intent IN ('buy','sell','rent')),
+      intent TEXT NOT NULL DEFAULT 'buy' CHECK (intent IN ('buy','rent')),
       society TEXT NOT NULL DEFAULT '',
       budget_min REAL NOT NULL DEFAULT 0,
       budget_max REAL NOT NULL DEFAULT 0,
@@ -318,10 +318,30 @@ export async function initSchema() {
       status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid')),
       paid_at TEXT,
       manual INTEGER NOT NULL DEFAULT 0,
+      -- The agent's share of the owner's total above: what the owner owes
+      -- the agent, and whether the owner has paid it. The two statuses
+      -- change independently (see src/routes/commissions.js).
+      agent_amount REAL NOT NULL DEFAULT 0,
+      agent_status TEXT NOT NULL DEFAULT 'pending' CHECK (agent_status IN ('pending','paid')),
+      agent_paid_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_commissions_agent ON commissions(agent_id);
     CREATE INDEX IF NOT EXISTS idx_commissions_status ON commissions(status);
+    -- idx_commissions_agent_status is created by migrateV13 (after the
+    -- agent columns exist on upgraded databases).
+
+    CREATE TABLE IF NOT EXISTS expenses (
+      id TEXT PRIMARY KEY,
+      date TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'Misc',
+      description TEXT NOT NULL DEFAULT '',
+      amount REAL NOT NULL DEFAULT 0,
+      recorded_by TEXT REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);
+    CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category);
 
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY,
@@ -399,6 +419,7 @@ export async function initSchema() {
 
   await migrateV11();
   await migrateV12();
+  await migrateV13();
 
   await db.prepare('INSERT OR IGNORE INTO ai_config (id) VALUES (1)').run();
   await db.prepare('INSERT OR IGNORE INTO whatsapp_config (id) VALUES (1)').run();
@@ -607,8 +628,13 @@ async function migrateV12() {
   // --- Leads: 'rent' intent ---------------------------------------------------
   // deals.lead_id REFERENCES leads(id), so the DROP needs the in-batch
   // PRAGMA OFF just like the properties rebuild above.
+  // The rebuild is skipped when the table is already on the v1.2 shape
+  // ('buy','sell','rent') OR the v1.3 shape ('buy','rent'): a fresh v1.3
+  // database must NOT be rebuilt back to the wider v1.2 CHECK, and an
+  // upgraded database keeps its 'sell' rows readable (the API rejects
+  // new 'sell' leads; no rebuild ever reclassifies or drops them).
   const leadSql = await tableSql('leads');
-  if (!leadSql.includes("'buy','sell','rent'")) {
+  if (!leadSql.includes("'buy','sell','rent'") && !leadSql.includes("'buy','rent'")) {
     await db.exec(`
         PRAGMA foreign_keys = OFF;
         DROP TABLE IF EXISTS leads_new;
@@ -653,6 +679,21 @@ async function migrateV12() {
     await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_intent ON leads(intent)');
     await db.exec('CREATE INDEX IF NOT EXISTS idx_leads_society ON leads(society)');
   }
+}
+
+// --- v1.3 migrations: agent share on commissions ------------------------------
+// New columns only, added probe-guarded via addColumnIfMissing — no table
+// rebuild. Existing rows get agent_amount = 0 / agent_status = 'pending'
+// from the column defaults, so no data changes.
+// The leads intent CHECK is narrowed to ('buy','rent') in the fresh-DB
+// CREATE TABLE above only: existing databases keep their wider CHECK and
+// their 'sell' rows stay readable (the API rejects new 'sell' leads).
+
+async function migrateV13() {
+  await addColumnIfMissing('commissions', "agent_amount REAL NOT NULL DEFAULT 0", 'agent_amount');
+  await addColumnIfMissing('commissions', "agent_status TEXT NOT NULL DEFAULT 'pending' CHECK (agent_status IN ('pending','paid'))", 'agent_status');
+  await addColumnIfMissing('commissions', 'agent_paid_at TEXT', 'agent_paid_at');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_commissions_agent_status ON commissions(agent_status)');
 }
 
 // --- Row mappers (snake_case -> camelCase) ----------------------------------

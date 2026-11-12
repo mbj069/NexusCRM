@@ -63,7 +63,8 @@ router.get('/', ah(async (req, res) => {
 // COMMISSION_MANUAL, exactly like an admin manual override.
 router.post('/', ah(async (req, res) => {
   const { leadId, propertyId, dealValue, bayanaAmount = 0, commissionType = 'percent',
-    commissionValue = 0, notes = '', agentId, commissionPick, commissionAmount: manualComm } = req.body || {};
+    commissionValue = 0, notes = '', agentId, commissionPick, commissionAmount: manualComm,
+    agentShareAmount, agentSharePercent } = req.body || {};
   if (!propertyId) throw httpError(400, 'propertyId is required.');
   const propRow = await db.prepare('SELECT * FROM properties WHERE id = ?').get(propertyId);
   if (!propRow) throw httpError(404, 'Property not found.');
@@ -95,6 +96,19 @@ router.post('/', ah(async (req, res) => {
     value = Number(dealValue);
     commAmount = commissionAmount(value, commType, commValue);
   }
+  // Agent share: the agent's manual portion of the owner's total commission.
+  // `agentShareAmount` (>= 0) wins when both are given; otherwise
+  // `agentSharePercent` (0–100) computes amount = total × percent/100 and
+  // only the AMOUNT is stored. No share given → agent_amount = 0.
+  const hasShareAmount = agentShareAmount !== undefined && agentShareAmount !== null && agentShareAmount !== '';
+  const hasSharePercent = agentSharePercent !== undefined && agentSharePercent !== null && agentSharePercent !== '';
+  if (hasShareAmount && !(Number(agentShareAmount) >= 0)) throw httpError(400, 'agentShareAmount must be zero or more.');
+  if (hasSharePercent && !(Number(agentSharePercent) >= 0 && Number(agentSharePercent) <= 100)) {
+    throw httpError(400, 'agentSharePercent must be between 0 and 100.');
+  }
+  // commAmount (the owner total) is fixed by the rental/sale branch above.
+  const agentShare = hasShareAmount ? Number(agentShareAmount)
+    : hasSharePercent ? (commAmount * Number(agentSharePercent)) / 100 : 0;
   if (leadId) {
     const lead = await db.prepare('SELECT id, assigned_to FROM leads WHERE id = ?').get(leadId);
     if (!lead) throw httpError(400, 'Lead not found.');
@@ -121,11 +135,16 @@ router.post('/', ah(async (req, res) => {
     await tx.prepare(`UPDATE properties SET status = 'Booked', updated_at = datetime('now') WHERE id = ?`)
       .run(propertyId);
     const commId = uid();
-    await tx.prepare('INSERT INTO commissions (id, deal_id, agent_id, amount, status, manual) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(commId, dealId, agent, commAmount, 'pending', isRental ? 1 : 0);
+    await tx.prepare(`INSERT INTO commissions (id, deal_id, agent_id, amount, status, manual,
+        agent_amount, agent_status, agent_paid_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL)`)
+      .run(commId, dealId, agent, commAmount, 'pending', isRental ? 1 : 0, agentShare);
     if (isRental) {
       await auditReq(req, 'COMMISSION_MANUAL', { entityType: 'commission', entityId: commId,
         details: `Rental commission set manually (deal ${dealId}, agent ${agent}): ${commAmount}${commissionPick ? ` (${commissionPick} month of rent)` : ' (manual amount)'}.` }, tx);
+    }
+    if (agentShare > 0) {
+      await auditReq(req, 'COMMISSION_AGENT_SHARE', { entityType: 'commission', entityId: commId,
+        details: `Agent share set at deal creation (deal ${dealId}, agent ${agent}): ${agentShare} of owner total ${commAmount}.` }, tx);
     }
     await auditReq(req, 'DEAL_CREATE', { entityType: 'deal', entityId: dealId, details: `Deal created: ${prop.code} @ ${value}${isRental ? ' (rental, first month rent)' : ''} (agent ${agent}).` }, tx);
     await auditReq(req, 'PROPERTY_ASSIGN', { entityType: 'property', entityId: propertyId, details: `Property ${prop.code} booked by deal ${dealId}.` }, tx);
@@ -147,6 +166,16 @@ router.get('/:id', ah(async (req, res) => {
   deal.property = row.property_id ? camel(await db.prepare('SELECT * FROM properties WHERE id = ?').get(row.property_id)) : null;
   deal.commissions = (await db.prepare(`SELECT c.*, u.name AS agent_name FROM commissions c
     LEFT JOIN users u ON u.id = c.agent_id WHERE c.deal_id = ?`).all(req.params.id)).map(camel);
+  // Agents see only their share of a deal's commission, never the owner's
+  // totals — strip the owner fields from the embedded rows server-side
+  // (the Commissions page already omits the owner summary for agents).
+  if (isAgent(req)) {
+    deal.commissions = deal.commissions.map((c) => ({
+      id: c.id, dealId: c.dealId, agentId: c.agentId, agentName: c.agentName,
+      agentAmount: c.agentAmount, agentStatus: c.agentStatus, agentPaidAt: c.agentPaidAt,
+      createdAt: c.createdAt,
+    }));
+  }
   const plans = (await db.prepare('SELECT * FROM payment_plans WHERE deal_id = ?').all(req.params.id)).map(camel);
   for (const plan of plans) {
     plan.schedule = (await db.prepare('SELECT * FROM payment_schedule WHERE plan_id = ? ORDER BY seq').all(plan.id)).map(camel);

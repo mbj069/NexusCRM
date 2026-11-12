@@ -7,6 +7,7 @@ import {
 } from '../components/ui';
 import DealModal from '../components/DealModal';
 import { DocumentsPanel } from './Contacts';
+import { useAuth } from '../auth';
 
 const DEAL_STAGES = ['proposed', 'token_paid', 'in_progress', 'closed_won', 'closed_lost', 'cancelled'];
 const KIND_ICONS = { note: '📝', call: '📞', viewing: '👁️', message: '💬', stage_change: '🔀' };
@@ -244,6 +245,9 @@ function PlanGenerator({ deal, lead, onCreated }) {
 
 export function DealDetail() {
   const { id } = useParams();
+  const { isAgent } = useAuth();
+  // Agents see ONLY their share figures — never owner amounts.
+  const showOwner = !isAgent;
   const [deal, setDeal] = useState(null);
   const [plans, setPlans] = useState([]);
   const [commissions, setCommissions] = useState([]);
@@ -414,14 +418,27 @@ export function DealDetail() {
         ) : (
           <div className="table-wrap">
             <table className="table">
-              <thead><tr><th>Agent</th><th className="num">Amount</th><th>Status</th><th>Paid at</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  {showOwner && <th className="num">Total</th>}
+                  <th className="num">Agent share</th>
+                  {showOwner && <th>Owner status</th>}
+                  <th>Share status</th>
+                  {showOwner && <th>Paid at</th>}
+                  <th>Share paid at</th>
+                </tr>
+              </thead>
               <tbody>
                 {commissions.map((c) => (
                   <tr key={c.id}>
                     <td>{c.agentName || c.agent?.name || '—'}</td>
-                    <td className="num"><strong>{pkr(c.amount)}</strong></td>
-                    <td><Badge status={c.status} /></td>
-                    <td className="muted">{c.paidAt ? fmtDateTime(c.paidAt) : '—'}</td>
+                    {showOwner && <td className="num"><strong>{pkr(c.amount)}</strong></td>}
+                    <td className="num"><strong>{pkr(c.agentAmount ?? 0)}</strong></td>
+                    {showOwner && <td><Badge status={c.status} /></td>}
+                    <td><Badge status={c.agentStatus} /></td>
+                    {showOwner && <td className="muted">{c.paidAt ? fmtDateTime(c.paidAt) : '—'}</td>}
+                    <td className="muted">{c.agentPaidAt ? fmtDateTime(c.agentPaidAt) : '—'}</td>
                   </tr>
                 ))}
               </tbody>

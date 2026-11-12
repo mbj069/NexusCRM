@@ -1,5 +1,17 @@
-// Commissions: agents see only their own rows; paying out and manual
-// overrides are admin-only.
+// Commissions: owner total vs agent share.
+//
+// Each row carries TWO independent money tracks:
+//   amount + status/paid_at        = the OWNER's total commission and
+//     whether the OWNER has received it.
+//   agent_amount + agent_status/agent_paid_at = the AGENT's share of that
+//     total and whether the owner has paid it to the agent.
+// The two statuses change independently: marking the owner paid never
+// touches agent_status, and vice versa. `amount` is always the owner
+// total — it never sets the agent share.
+//
+// Agents see only their own rows, and never owner totals: for agents the
+// list response omits the owner `summary` entirely and returns only
+// `agentSummary` (their share figures).
 
 import { Router } from 'express';
 import { db, camel } from '../db.js';
@@ -13,6 +25,10 @@ router.use(requireAuth, requirePermission('crm'));
 
 // GET /api/commissions?agentId=&status=&from=&to=
 // Agents are always scoped to their own rows, regardless of query params.
+// Admin/manager: { commissions, summary, agentSummary }.
+//   summary: owner totals over returned rows { pending, paid } (on amount).
+//   agentSummary: agent-share totals { agentPending, agentPaid } (on agent_amount).
+// Agent: { commissions, agentSummary } only — no owner summary.
 router.get('/', ah(async (req, res) => {
   const { agentId, status, from, to } = req.query;
   const where = [];
@@ -34,37 +50,63 @@ router.get('/', ah(async (req, res) => {
     LEFT JOIN properties pr ON pr.id = d.property_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.created_at DESC`;
   const rows = (await db.prepare(sql).all(...params)).map(camel);
+  const agentSummary = {
+    agentPending: rows.filter((r) => r.agentStatus === 'pending').reduce((s, r) => s + (r.agentAmount || 0), 0),
+    agentPaid: rows.filter((r) => r.agentStatus === 'paid').reduce((s, r) => s + (r.agentAmount || 0), 0),
+  };
+  if (req.user.role === 'agent') {
+    return res.json({ commissions: rows, agentSummary });
+  }
   const summary = {
     pending: rows.filter((r) => r.status === 'pending').reduce((s, r) => s + r.amount, 0),
     paid: rows.filter((r) => r.status === 'paid').reduce((s, r) => s + r.amount, 0),
   };
-  res.json({ commissions: rows, summary });
+  res.json({ commissions: rows, summary, agentSummary });
 }));
 
-// PUT /api/commissions/:id — manual override (admin only): set the amount
-// and/or status independent of the auto percent/fixed calculation at deal
-// creation. Sets manual=1 so later deal-term edits do not overwrite it.
-// Every manual change is audit-logged with old → new values.
+// PUT /api/commissions/:id — manual override (admin only).
+// `amount`/`status` set the OWNER total (and set manual=1, audit
+// COMMISSION_MANUAL). `agentAmount`/`agentStatus` set the AGENT share
+// (and set manual=1, audit COMMISSION_AGENT_SHARE). The two tracks are
+// independent: `amount` never touches the share, and changing the share
+// never touches the owner total. If both change in one call, both audit
+// entries are written.
 router.put('/:id', ah(async (req, res) => {
   if (!can(req.user.role, 'assign_commissions')) {
     throw httpError(403, 'Only an admin can set commissions manually.');
   }
   const row = await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id);
   if (!row) throw httpError(404, 'Commission not found.');
-  const { amount, status } = req.body || {};
+  const { amount, status, agentAmount, agentStatus } = req.body || {};
   if (amount !== undefined && !(Number(amount) >= 0)) throw httpError(400, 'Amount must be zero or more.');
   if (status !== undefined && !['pending', 'paid'].includes(status)) throw httpError(400, 'Status must be pending or paid.');
+  if (agentAmount !== undefined && !(Number(agentAmount) >= 0)) throw httpError(400, 'Agent amount must be zero or more.');
+  if (agentStatus !== undefined && !['pending', 'paid'].includes(agentStatus)) throw httpError(400, 'Agent status must be pending or paid.');
   const nextAmount = amount !== undefined ? Number(amount) : row.amount;
   const nextStatus = status ?? row.status;
   const nextPaidAt = nextStatus === 'paid' ? (row.paid_at || new Date().toISOString()) : null;
-  await db.prepare(`UPDATE commissions SET amount = ?, status = ?, paid_at = ?, manual = 1 WHERE id = ?`)
-    .run(nextAmount, nextStatus, nextPaidAt, req.params.id);
-  auditReq(req, 'COMMISSION_MANUAL', { entityType: 'commission', entityId: req.params.id,
-    details: `Manual commission override (deal ${row.deal_id}, agent ${row.agent_id}): ${row.amount} ${row.status} → ${nextAmount} ${nextStatus}.` });
+  const nextAgentAmount = agentAmount !== undefined ? Number(agentAmount) : (row.agent_amount ?? 0);
+  const nextAgentStatus = agentStatus ?? row.agent_status ?? 'pending';
+  const nextAgentPaidAt = nextAgentStatus === 'paid' ? (row.agent_paid_at || new Date().toISOString()) : null;
+  await db.prepare(`UPDATE commissions SET amount = ?, status = ?, paid_at = ?,
+      agent_amount = ?, agent_status = ?, agent_paid_at = ?, manual = 1 WHERE id = ?`)
+    .run(nextAmount, nextStatus, nextPaidAt, nextAgentAmount, nextAgentStatus, nextAgentPaidAt, req.params.id);
+  const totalChanged = nextAmount !== row.amount || nextStatus !== row.status;
+  const shareChanged = nextAgentAmount !== (row.agent_amount ?? 0) || nextAgentStatus !== (row.agent_status ?? 'pending');
+  if (totalChanged) {
+    auditReq(req, 'COMMISSION_MANUAL', { entityType: 'commission', entityId: req.params.id,
+      details: `Manual commission override (deal ${row.deal_id}, agent ${row.agent_id}): owner total ${row.amount} ${row.status} → ${nextAmount} ${nextStatus}.` });
+  }
+  if (shareChanged) {
+    auditReq(req, 'COMMISSION_AGENT_SHARE', { entityType: 'commission', entityId: req.params.id,
+      details: `Agent share changed (deal ${row.deal_id}, agent ${row.agent_id}): ${row.agent_amount ?? 0} ${row.agent_status ?? 'pending'} → ${nextAgentAmount} ${nextAgentStatus}.` });
+  }
   res.json(camel(await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id)));
 }));
 
-// POST /api/commissions/:id/pay { paidAt? } — admin only
+// POST /api/commissions/:id/pay { paidAt? } — admin only.
+// Marks the OWNER's commission received (owner status → paid). The agent
+// share is untouched: agent_status stays exactly as it was.
 router.post('/:id/pay', ah(async (req, res) => {
   if (!can(req.user.role, 'pay_commissions')) {
     throw httpError(403, 'Insufficient permissions.');
@@ -76,7 +118,25 @@ router.post('/:id/pay', ah(async (req, res) => {
   if (paidAt !== undefined && !/^\d{4}-\d{2}-\d{2}/.test(paidAt)) throw httpError(400, 'paidAt must be a date.');
   const stamp = paidAt ? `${String(paidAt).slice(0, 10)}T00:00:00.000Z` : new Date().toISOString();
   await db.prepare(`UPDATE commissions SET status = 'paid', paid_at = ? WHERE id = ?`).run(stamp, req.params.id);
-  auditReq(req, 'COMMISSION_PAY', { entityType: 'commission', entityId: req.params.id, details: `Commission ${row.amount} paid to agent ${row.agent_id} (deal ${row.deal_id}).` });
+  auditReq(req, 'COMMISSION_PAY', { entityType: 'commission', entityId: req.params.id, details: `Owner commission received: ${row.amount} (deal ${row.deal_id}, agent ${row.agent_id}). Agent share unchanged (${row.agent_amount ?? 0} ${row.agent_status ?? 'pending'}).` });
+  res.json(camel(await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id)));
+}));
+
+// POST /api/commissions/:id/pay-agent-share { paidAt? } — admin only.
+// Marks ONLY the agent share paid (agent_status → paid). The owner total
+// is untouched: status stays exactly as it was.
+router.post('/:id/pay-agent-share', ah(async (req, res) => {
+  if (!can(req.user.role, 'pay_commissions')) {
+    throw httpError(403, 'Insufficient permissions.');
+  }
+  const row = await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id);
+  if (!row) throw httpError(404, 'Commission not found.');
+  if ((row.agent_status ?? 'pending') === 'paid') throw httpError(400, 'Agent share is already paid.');
+  const { paidAt } = req.body || {};
+  if (paidAt !== undefined && !/^\d{4}-\d{2}-\d{2}/.test(paidAt)) throw httpError(400, 'paidAt must be a date.');
+  const stamp = paidAt ? `${String(paidAt).slice(0, 10)}T00:00:00.000Z` : new Date().toISOString();
+  await db.prepare(`UPDATE commissions SET agent_status = 'paid', agent_paid_at = ? WHERE id = ?`).run(stamp, req.params.id);
+  auditReq(req, 'COMMISSION_AGENT_SHARE_PAY', { entityType: 'commission', entityId: req.params.id, details: `Agent share paid: ${row.agent_amount ?? 0} to agent ${row.agent_id} (deal ${row.deal_id}). Owner total unchanged (${row.amount} ${row.status}).` });
   res.json(camel(await db.prepare('SELECT * FROM commissions WHERE id = ?').get(req.params.id)));
 }));
 
