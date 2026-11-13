@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { get, post, asArray } from '../api';
 import { fmtDateTime } from './ui';
@@ -93,8 +93,31 @@ function NotificationsBell() {
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const role = user?.role || 'agent';
   const links = NAV.filter((l) => l.roles.includes(role));
+
+  // Mobile navigation drawer (<=760px). On desktop the sidebar is a static
+  // column and this state is inert — the hamburger and backdrop are hidden.
+  const [navOpen, setNavOpen] = useState(false);
+  const closeNav = () => setNavOpen(false);
+
+  // Close the drawer whenever the route changes (covers nav-link taps and
+  // programmatic navigation alike).
+  useEffect(() => { setNavOpen(false); }, [location.pathname]);
+
+  // While the drawer is open: Escape closes it and body scroll is locked.
+  useEffect(() => {
+    if (!navOpen) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setNavOpen(false); };
+    document.addEventListener('keydown', onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [navOpen]);
 
   const handleLogout = () => {
     logout();
@@ -105,7 +128,7 @@ export default function Layout() {
 
   return (
     <div className="app">
-      <aside className="sidebar">
+      <aside className={`sidebar${navOpen ? ' open' : ''}`} id="mobile-nav">
         <div className="brand">
           <div className="brand-mark">N</div>
           <div>
@@ -115,17 +138,32 @@ export default function Layout() {
         </div>
         <nav className="nav">
           {links.map((l) => (
-            <NavLink key={l.to} to={l.to} end={l.end} className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+            <NavLink key={l.to} to={l.to} end={l.end} onClick={closeNav} className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
               <span className="nav-icon">{l.icon}</span>
               {l.label}
             </NavLink>
           ))}
         </nav>
-        <div className="sidebar-foot">NexusCRM v1.3</div>
+        <div className="sidebar-foot">NexusCRM v1.4</div>
       </aside>
+
+      {/* Backdrop is a direct child of .app — a sibling of the sidebar and
+          the main column, never nested inside a filtered/transformed
+          ancestor, so its fixed positioning always covers the viewport. */}
+      {navOpen && <div className="nav-backdrop" onClick={closeNav} aria-hidden="true" />}
 
       <div className="main">
         <header className="topbar">
+          <button
+            type="button"
+            className="hamburger"
+            aria-expanded={navOpen}
+            aria-controls="mobile-nav"
+            aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
+            onClick={() => setNavOpen((o) => !o)}
+          >
+            ☰
+          </button>
           <div className="topbar-title">NexusCRM</div>
           <div className="topbar-right">
             <NotificationsBell />
