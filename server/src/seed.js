@@ -16,6 +16,14 @@
 // share beside the owner total (D1 78,000 / share 15,000; D2 125,000 /
 // share 25,000 paid; D3 owner paid, share 20,000 still pending; D4 rental
 // 22,500 / share 5,000), plus a few office expenses.
+//
+// v1.4: the expense dates are spread across Jun–Nov 2026 (one per month)
+// so the owner-earnings endpoint has real multi-month cash-basis data to
+// chew on. Only dates moved — every amount is unchanged: expenses still
+// total 442,000, owner commission received is still 131,250 (D3, paid
+// 2026-10-05) and agent shares paid still 25,000 (D2, paid 2026-10-06),
+// so the default 6-month earnings view nets −335,750. All other seed
+// dates (deals, plans, activities) are untouched.
 
 import 'dotenv/config';
 import bcrypt from 'bcryptjs';
@@ -242,11 +250,13 @@ try {
     // --- Expenses (office running costs) ----------------------------------------
     const insExp = tx.prepare(`INSERT INTO expenses (id, date, category, description, amount, recorded_by)
       VALUES (?, ?, ?, ?, ?, ?)`);
-    await insExp.run(uid(), '2026-11-01', 'Office Rent', 'November office rent, Kachehri Road.', 120000, adminId);
-    await insExp.run(uid(), '2026-11-01', 'Salaries', 'November staff salaries.', 250000, adminId);
-    await insExp.run(uid(), '2026-11-03', 'Utilities', 'Electricity + water bills.', 18500, managerId);
-    await insExp.run(uid(), '2026-11-05', 'Marketing', 'Facebook ads for rental listings.', 45000, managerId);
-    await insExp.run(uid(), '2026-11-07', 'Office Supplies', 'Stationery and printing.', 8500, managerId);
+    // v1.4: one expense per month, Jun–Oct 2026 (see header note) — amounts
+    // unchanged from v1.3, total still 442,000.
+    await insExp.run(uid(), '2026-06-01', 'Office Rent', 'June office rent, Kachehri Road.', 120000, adminId);
+    await insExp.run(uid(), '2026-07-01', 'Salaries', 'July staff salaries.', 250000, adminId);
+    await insExp.run(uid(), '2026-08-03', 'Utilities', 'Electricity + water bills.', 18500, managerId);
+    await insExp.run(uid(), '2026-09-05', 'Marketing', 'Facebook ads for rental listings.', 45000, managerId);
+    await insExp.run(uid(), '2026-10-07', 'Office Supplies', 'Stationery and printing.', 8500, managerId);
 
     // --- Notifications ------------------------------------------------------------------
     const insNotif = tx.prepare(`INSERT INTO notifications (id, user_id, kind, title, body, link, is_read)

@@ -34,6 +34,23 @@ dashboards (admin Total/Pending commission up front, manager commission
 counts with no money, agent My Total/Pending commission) and a Quick Add
 bar on the dashboard that opens any section's add form.
 
+v1.4 adds: owner earnings (`GET /api/earnings`, admin-only) — what the owner
+actually pockets, on a **cash basis**: money counts in the month it moved,
+not the month the deal was made. `netEarnings = commissionReceived −
+agentSharesPaid − expenses`, per month and in total. What counts:
+commission received = owner totals with status `paid`, bucketed by `paid_at`;
+agent shares paid = agent shares with `agent_status` `paid`, bucketed by
+`agent_paid_at`; expenses by their date. What doesn't count: pending
+commissions and pending agent shares never appear — they stay visible only
+as the Pending commission figure on the dashboard. Ranges: `?preset=3m |
+6m | 12m | all` (default `6m` — the last 6 calendar months including the
+current one; `all` runs from the earliest month with any earnings data) or
+an explicit `?from=YYYY-MM-DD&to=YYYY-MM-DD`. Every month in the range gets
+a row, zero-filled when nothing happened in it. The seed spreads its
+expenses across Jun–Oct 2026 so the default 6-month view has real
+multi-month data (demo: received 131,250, shares paid 25,000, expenses
+442,000, net −335,750).
+
 Stack: React (Vite) frontend · Express backend · Turso (libSQL) database —
 remote Turso in production, local libSQL file in development · bcrypt password
 hashing · JWT auth · server-enforced RBAC (admin / manager / agent) ·
@@ -267,6 +284,12 @@ terminal property status on closed rental deals; commissions-first
 dashboards (admin Total/Pending commission, manager commission counts with
 no money, agent My Total/Pending commission) and a Quick Add bar on the
 dashboard that opens each section's add form.
+
+**v1.4 — shipped:** owner earnings (`GET /api/earnings`, admin-only, cash
+basis — see the v1.4 paragraph at the top): net = commission received −
+agent shares paid − expenses, per month and in total, with `3m` / `6m` /
+`12m` / `all` presets or an explicit date range; pending commissions and
+pending agent shares never count.
 
 **v2 — deliberately deferred:** full 24/7 AI chat automation on WhatsApp
 (needs the client's Meta approval above); social-channel lead capture; richer

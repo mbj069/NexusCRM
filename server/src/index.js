@@ -27,6 +27,7 @@ import documentsRouter from './routes/documents.js';
 import aiRouter from './routes/ai.js';
 import { webhookRouter, whatsappRouter } from './routes/whatsapp.js';
 import dashboardRouter from './routes/dashboard.js';
+import earningsRouter from './routes/earnings.js';
 import notificationsRouter from './routes/notifications.js';
 import auditRouter from './routes/audit.js';
 
@@ -59,6 +60,7 @@ app.use('/api/ai', aiRouter);
 app.use('/api/webhooks/whatsapp', webhookRouter);
 app.use('/api/whatsapp', whatsappRouter);
 app.use('/api/dashboard', dashboardRouter);
+app.use('/api/earnings', earningsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/audit', auditRouter);
 

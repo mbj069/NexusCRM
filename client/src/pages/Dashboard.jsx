@@ -1,20 +1,22 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { get, asArray, asKeyCounts } from '../api';
+import { get, qs, asArray, asKeyCounts } from '../api';
 import { useAuth } from '../auth';
 import {
   PageHeader, Stat, Card, EmptyState, Spinner, Alert,
-  pkr, prettyLabel,
+  pkr, fmtDate, prettyLabel,
 } from '../components/ui';
 
 /* ---------- Hand-rolled SVG charts (no chart library) ---------- */
 
-/** Compact axis number: 1500 -> "1.5k", 2,500,000 -> "2.5M". */
+/** Compact axis number: 1500 -> "1.5k", 2,500,000 -> "2.5M". Sign-aware so negative ticks read "-1.5k". */
 function fmtCompact(n) {
   const v = Number(n) || 0;
   const trim = (x) => String(Math.round(x * 10) / 10).replace(/\.0$/, '');
-  if (v >= 1_000_000) return `${trim(v / 1_000_000)}M`;
-  if (v >= 1000) return `${trim(v / 1000)}k`;
+  const sign = v < 0 ? '-' : '';
+  const a = Math.abs(v);
+  if (a >= 1_000_000) return `${sign}${trim(a / 1_000_000)}M`;
+  if (a >= 1000) return `${sign}${trim(a / 1000)}k`;
   return String(v);
 }
 
@@ -101,6 +103,84 @@ function GroupedBarChart({ rows, series, money }) {
 }
 
 /**
+ * Single-series vertical bar chart for monthly net earnings.
+ * Same hand-rolled SVG style as GroupedBarChart, but it handles negative
+ * values: the scale spans min..max, a zero line is drawn across the plot,
+ * positive months rise above it (green) and negative months hang below it
+ * (red), so a loss month can never be mistaken for a gain.
+ * rows: [{ month, netEarnings }].
+ */
+function NetEarningsBarChart({ rows }) {
+  const W = 640;
+  const H = 280;
+  const padL = 64;
+  const padR = 12;
+  const padT = 18;
+  const padB = 32;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const values = rows.map((r) => Number(r.netEarnings) || 0);
+  const max = Math.max(0, ...values);
+  const min = Math.min(0, ...values);
+  const span = Math.max(1, max - min);
+  const y = (v) => padT + ((max - v) / span) * plotH;
+  const zeroY = y(0);
+  const groupW = rows.length ? plotW / rows.length : plotW;
+  const barW = Math.max(6, Math.min(36, groupW * 0.6));
+  // Axis ticks: top, zero, bottom — deduped when a side is all zero.
+  const tickValues = [...new Set([max, 0, min])].filter((v, i, a) => a.indexOf(v) === i);
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }} role="img">
+        {tickValues.map((v) => (
+          <g key={v}>
+            <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} stroke="var(--slate-200)" strokeWidth="1" />
+            <text x={padL - 8} y={y(v) + 4} textAnchor="end" fontSize="11" fill="var(--slate-500)">
+              {`PKR ${fmtCompact(v)}`}
+            </text>
+          </g>
+        ))}
+        <line x1={padL} x2={W - padR} y1={zeroY} y2={zeroY} stroke="var(--slate-400)" strokeWidth="1.5" />
+        {rows.map((r, i) => {
+          const v = Number(r.netEarnings) || 0;
+          const positive = v >= 0;
+          const top = positive ? y(v) : zeroY;
+          const h = Math.abs(zeroY - y(v));
+          return (
+            <g key={r.month || i}>
+              <rect
+                x={padL + i * groupW + (groupW - barW) / 2}
+                y={top}
+                width={barW}
+                height={Math.max(h, v !== 0 ? 2 : 0)}
+                rx={3}
+                fill={positive ? '#16a34a' : '#dc2626'}
+              >
+                <title>{`${fmtMonth(r.month)} — Net earnings: ${pkr(v)}`}</title>
+              </rect>
+              <text x={padL + i * groupW + groupW / 2} y={H - 10} textAnchor="middle" fontSize="11" fill="var(--slate-600)">
+                {fmtMonth(r.month)}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 8 }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--slate-600)' }}>
+          <span style={{ width: 12, height: 12, borderRadius: 3, background: '#16a34a', display: 'inline-block' }} />
+          Profit month
+        </span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--slate-600)' }}>
+          <span style={{ width: 12, height: 12, borderRadius: 3, background: '#dc2626', display: 'inline-block' }} />
+          Loss month
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Horizontal bar chart for stage/status breakdowns.
  * rows: [{ label, count }]. One indigo/blue/green bar per row, value at the end.
  */
@@ -144,6 +224,41 @@ export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+
+  // Owner's earnings (admin only). earnRange is the applied selection:
+  // { preset: '3m'|'6m'|'12m'|'all' } or { from, to } for a custom range.
+  // Default is 6 months, matching the endpoint default.
+  const [earnings, setEarnings] = useState(null);
+  const [earningsLoading, setEarningsLoading] = useState(false);
+  const [earningsError, setEarningsError] = useState('');
+  const [earnPreset, setEarnPreset] = useState('6m');
+  const [earnRange, setEarnRange] = useState({ preset: '6m' });
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  const loadEarnings = async (range) => {
+    setEarningsLoading(true);
+    setEarningsError('');
+    try {
+      const query = range.from
+        ? qs({ from: range.from, to: range.to })
+        : qs({ preset: range.preset || '6m' });
+      const d = await get(`/api/earnings${query}`);
+      setEarnings(d);
+    } catch (e) {
+      setEarningsError(e.message);
+    } finally {
+      setEarningsLoading(false);
+    }
+  };
+
+  // Earnings are fetched only for admins — the endpoint is admin-only
+  // (403 for everyone else), so managers and agents never call it.
+  useEffect(() => {
+    if (!isAdmin) return;
+    loadEarnings(earnRange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, earnRange]);
 
   const load = async () => {
     setLoading(true);
@@ -209,6 +324,28 @@ export default function Dashboard() {
     : isManager ? 'Team overview — leads and deals'
       : 'My day — my leads, my deals, my share';
 
+  // Earnings derived values (admin only; all fall back to zero/empty).
+  const earnTotals = earnings?.totals || {};
+  const earnMonthly = asArray(earnings?.monthly);
+  const earnNet = Number(earnTotals.netEarnings) || 0;
+  const earnHasData = earnMonthly.length > 0;
+  const earnPeriod = earnings?.from && earnings?.to
+    ? `${fmtDate(earnings.from)} – ${fmtDate(earnings.to)}`
+    : '';
+
+  const applyCustomRange = () => {
+    if (!customFrom || !customTo) {
+      setEarningsError('Pick both a start and an end date for the custom range.');
+      return;
+    }
+    if (customFrom > customTo) {
+      setEarningsError('Start date must be on or before the end date.');
+      return;
+    }
+    setEarnPreset('custom');
+    setEarnRange({ from: customFrom, to: customTo });
+  };
+
   return (
     <>
       <PageHeader
@@ -239,8 +376,8 @@ export default function Dashboard() {
         {isAdmin && (
           <>
             <Stat label="Total commission" value={pkr(data?.totalCommission ?? 0)} sub="Pending + paid, all deals" accent />
-            <Stat label="Pending commission" value={pkr(data?.pendingCommission ?? 0)} sub="Owed to agents" />
-            <Stat label="Commission paid" value={pkr(data?.paidCommission ?? 0)} sub="Paid out" />
+            <Stat label="Pending commission" value={pkr(data?.pendingCommission ?? 0)} sub="Not yet received" />
+            <Stat label="Commission paid" value={pkr(data?.paidCommission ?? 0)} sub="Received by owner" />
             <Stat label="Active leads" value={data?.activeLeads ?? totalLeads} sub="Across all stages" />
           </>
         )}
@@ -261,6 +398,128 @@ export default function Dashboard() {
           </>
         )}
       </div>
+
+      {/* Owner's earnings — admin only. Sits directly below the four hero
+          stats and above the commission-trend card. Managers and agents
+          never see this section and never call /api/earnings. */}
+      {isAdmin && (
+        <Card
+          title="Owner's Total Earnings"
+          className="section-gap"
+          actions={(
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+              {[
+                { key: '3m', label: '3 months' },
+                { key: '6m', label: '6 months' },
+                { key: '12m', label: '12 months' },
+                { key: 'all', label: 'All time' },
+              ].map((p) => (
+                <button
+                  key={p.key}
+                  className={`btn btn-sm ${earnPreset === p.key ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => { setEarnPreset(p.key); setEarnRange({ preset: p.key }); }}
+                >
+                  {p.label}
+                </button>
+              ))}
+              <input
+                type="date"
+                className="input"
+                style={{ width: 148, padding: '5px 8px', fontSize: 12.5 }}
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+                aria-label="Custom range start date"
+              />
+              <input
+                type="date"
+                className="input"
+                style={{ width: 148, padding: '5px 8px', fontSize: 12.5 }}
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+                aria-label="Custom range end date"
+              />
+              <button className="btn btn-secondary btn-sm" onClick={applyCustomRange}>Apply</button>
+            </div>
+          )}
+        >
+          {earningsLoading && !earnings ? (
+            <Spinner />
+          ) : earningsError ? (
+            <Alert kind="error">
+              {earningsError}
+              <div className="mt-3">
+                <button className="btn btn-secondary btn-sm" onClick={() => loadEarnings(earnRange)}>↻ Retry</button>
+              </div>
+            </Alert>
+          ) : !earnHasData ? (
+            <EmptyState icon="💰" title="No earnings data in this period" hint="Commission, agent shares and expenses recorded in the selected period will appear here." />
+          ) : (
+            <>
+              <div className="grid grid-4" style={{ marginBottom: 16 }}>
+                <div className="stat accent">
+                  <div className="stat-label">Net earnings</div>
+                  <div className="stat-value" style={earnNet < 0 ? { color: 'var(--red-600)' } : undefined}>
+                    {pkr(earnNet)}
+                  </div>
+                  <div className="stat-sub">{earnPeriod || 'Selected period'}</div>
+                </div>
+                <Stat label="Commission received" value={pkr(earnTotals.commissionReceived ?? 0)} sub="Received by owner" />
+                <Stat label="Agent shares paid" value={pkr(earnTotals.agentSharesPaid ?? 0)} sub="Paid out to agents" />
+                <Stat label="Expenses" value={pkr(earnTotals.expenses ?? 0)} sub="In selected period" />
+              </div>
+
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: 'var(--slate-800)', margin: '0 0 8px' }}>
+                Monthly net earnings
+              </h3>
+              <NetEarningsBarChart rows={earnMonthly} />
+
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: 'var(--slate-800)', margin: '20px 0 8px' }}>
+                Monthly report
+              </h3>
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Month</th>
+                      <th className="num">Commission received</th>
+                      <th className="num">Agent shares paid</th>
+                      <th className="num">Expenses</th>
+                      <th className="num">Net earnings</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {earnMonthly.map((r) => {
+                      const net = Number(r.netEarnings) || 0;
+                      return (
+                        <tr key={r.month}>
+                          <td>{fmtMonth(r.month)}</td>
+                          <td className="num">{pkr(r.commissionReceived ?? 0)}</td>
+                          <td className="num">{pkr(r.agentSharesPaid ?? 0)}</td>
+                          <td className="num">{pkr(r.expenses ?? 0)}</td>
+                          <td className="num" style={{ fontWeight: 700, color: net < 0 ? 'var(--red-600)' : undefined }}>
+                            {pkr(net)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ fontWeight: 700, background: 'var(--slate-50)' }}>
+                      <td>Total</td>
+                      <td className="num">{pkr(earnTotals.commissionReceived ?? 0)}</td>
+                      <td className="num">{pkr(earnTotals.agentSharesPaid ?? 0)}</td>
+                      <td className="num">{pkr(earnTotals.expenses ?? 0)}</td>
+                      <td className="num" style={{ color: earnNet < 0 ? 'var(--red-600)' : undefined }}>
+                        {pkr(earnNet)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
 
       <Card title={trendTitle} className="section-gap">
         {!trendHasData ? (

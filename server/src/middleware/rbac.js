@@ -5,11 +5,11 @@
 // only mirrors it):
 // admin   = everything — dashboard totals, users, audit log, settings
 //           (AI/WhatsApp), manual commissions, all leads/deals/payments,
-//           lead assignment.
+//           lead assignment, owner earnings.
 // manager = team-view dashboard (no money totals), all leads/deals/
 //           payments, lead assignment, inventory, contacts, follow-ups,
 //           commissions view-only, expenses read-only. No users, no audit
-//           log, no settings, no expense writes.
+//           log, no settings, no expense writes, no earnings.
 // agent   = own dashboard only, assigned leads only, own deals only, own
 //           commissions only, inventory browse (no totals), contacts
 //           linked to their own leads/deals, own follow-ups. No users, no
@@ -17,7 +17,7 @@
 //           data, no expenses at all.
 
 export const ROLES = {
-  admin: ['manage_users', 'ai_config', 'whatsapp_config', 'view_audit_log', 'pay_commissions', 'assign_commissions', 'assign_leads', 'manage_expenses', 'view_expenses', 'crm'],
+  admin: ['manage_users', 'ai_config', 'whatsapp_config', 'view_audit_log', 'pay_commissions', 'assign_commissions', 'assign_leads', 'manage_expenses', 'view_expenses', 'view_earnings', 'crm'],
   manager: ['assign_leads', 'view_expenses', 'crm'],
   agent: ['crm'],
 };
